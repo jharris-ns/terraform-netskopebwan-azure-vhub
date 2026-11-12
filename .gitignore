@@ -1,0 +1,37 @@
+# Terraform state — contains secrets (activation tokens, API tokens)
+terraform.tfstate
+terraform.tfstate.*
+*.tfstate
+*.tfstate.backup
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Actual variable values — may contain secrets
+# Use example.tfvars as the committed template
+terraform.tfvars
+
+# Terraform plan files
+*.tfplan
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+*.swp
+*~
+
+# Office documents — customer-specific, not for version control
+*.docx
+*.xlsx
+*.pptx
+*.doc
+*.pdf
+
+# Claude Code memory — personal, not for version control
+.claude/
