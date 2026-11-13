@@ -12,20 +12,20 @@ Two-phase Terraform deployment:
 
 ## Documentation
 
-Full documentation is in `docs/`. Always check the relevant doc before making changes in that area.
+Always check the relevant doc before making changes in that area.
 
 | Doc | When to read it |
 |---|---|
-| [README.md](README.md) | Overview, what's new, outputs, documentation index |
-| [docs/QUICKSTART.md](docs/QUICKSTART.md) | First-time two-phase deployment steps and verification |
-| [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) | Full variable reference for both workspaces, authentication, scaling, destruction |
+| [README.md](README.md) | Overview, quick start, architecture diagram, known gotchas |
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | Shortest path to a working deployment with expected outputs; 45 min end-to-end |
+| [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) | Step-by-step with explanations — full variable reference, authentication, scaling, destruction |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Topology, subnet layout, resource inventory, BGP design, Routing Intent behaviour |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Re-running BGP config / SSE monitor, gateway replacement, hub redeploy, BGP verification |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Diagnostic flowchart, common errors, gateway command reference, known limitations |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2: re-running BGP config / SSE monitor, gateway replacement, hub redeploy, BGP verification |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom-based: deployment errors, BGP not establishing, SSE monitor issues, known limitations |
 | [docs/RBAC_PERMISSIONS.md](docs/RBAC_PERMISSIONS.md) | Azure roles, Marketplace terms, CI/CD runner requirements |
-| [docs/STATE_MANAGEMENT.md](docs/STATE_MANAGEMENT.md) | Azure Blob Storage backend, one state key per workspace |
-| [docs/DEVOPS_NOTES.md](docs/DEVOPS_NOTES.md) | Terraform patterns, provider internals, Run Command and SSE monitor design |
-| [CHANGELOG.md](CHANGELOG.md) | Dated fixes and findings (e.g. BGP outbound filter fix) |
+| [docs/STATE_MANAGEMENT.md](docs/STATE_MANAGEMENT.md) | What Terraform state is, Azure Blob Storage backend setup, one state key per workspace |
+| [docs/DEVOPS_NOTES.md](docs/DEVOPS_NOTES.md) | Terraform code internals — patterns, provider design, Run Command and SSE monitor implementation |
+| [CHANGELOG.md](CHANGELOG.md) | Dated fixes and findings |
 
 ## File Map — `vwan-lab-nva/` (Phase 2, the active workspace)
 
