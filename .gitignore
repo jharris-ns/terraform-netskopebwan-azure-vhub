@@ -33,5 +33,4 @@ terraform.tfvars
 *.doc
 *.pdf
 
-# Claude Code memory — personal, not for version control
-.claude/
+
