@@ -44,3 +44,33 @@ resource "time_sleep" "hub_connection_delay" {
     hub_connection_id = azurerm_virtual_hub_connection.nva_spoke.id
   }
 }
+
+# Remove the static 0.0.0.0/0 route that the azurerm provider re-injects on
+# every apply. The route is undesirable because it hardcodes a single gateway
+# as next hop, defeating ECMP. 0.0.0.0/0 is correctly learned from all
+# gateways via HubBgpConnection — no static override needed.
+#
+# This null_resource runs after every hub connection change and after the
+# connection delay, ensuring the static route is always absent post-apply.
+resource "null_resource" "remove_static_default_route" {
+  triggers = {
+    hub_connection_id = azurerm_virtual_hub_connection.nva_spoke.id
+    # Re-run whenever gateway count changes so new applies are always clean.
+    gateway_count = var.gateway_count
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      echo "Removing static 0.0.0.0/0 route from conn-nva-spoke (azurerm provider limitation)..."
+      az network vhub connection update \
+        --resource-group ${var.resource_group_name} \
+        --vhub-name $(basename ${var.virtual_hub_id}) \
+        --name conn-nva-spoke \
+        --remove routingConfiguration.vnetRoutes.staticRoutes \
+        --output none 2>&1 || true
+      echo "Done."
+    EOT
+  }
+
+  depends_on = [time_sleep.hub_connection_delay]
+}

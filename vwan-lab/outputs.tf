@@ -85,9 +85,3 @@ output "vm_private_ips" {
   description = "Private IP addresses of the test VMs."
 }
 
-output "vm_public_ips" {
-  value = {
-    for k, v in azurerm_public_ip.spoke : k => v.ip_address
-  }
-  description = "Public IP addresses of the test VMs. SSH target for acceptance testing."
-}

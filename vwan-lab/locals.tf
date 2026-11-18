@@ -15,7 +15,6 @@ locals {
       subnet_prefix = var.spoke1_subnet_prefix
       nsg_name      = "nsg-spoke1-vm"
       vm_name       = "vm-spoke1-test01"
-      pip_name      = "pip-vm-spoke1-test01"
       nic_name      = "nic-vm-spoke1-test01"
     }
     spoke2 = {
@@ -25,7 +24,6 @@ locals {
       subnet_prefix = var.spoke2_subnet_prefix
       nsg_name      = "nsg-spoke2-vm"
       vm_name       = "vm-spoke2-test01"
-      pip_name      = "pip-vm-spoke2-test01"
       nic_name      = "nic-vm-spoke2-test01"
     }
   }
