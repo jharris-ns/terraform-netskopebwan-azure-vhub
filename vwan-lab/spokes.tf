@@ -1,10 +1,11 @@
 #------------------------------------------------------------------------------
 #  Spoke VNets, Subnets, and Hub Connections
 #
-#  internet_security_enabled = false — this lab does not use a Secured Virtual
-#  Hub / Routing Intent. Internet traffic from spoke VMs egresses directly from
-#  the spoke VNet (not via the hub). Transitive spoke-to-spoke routing is
-#  provided by the hub router automatically once both connections are attached.
+#  internet_security_enabled = true — forces spoke VMs to route internet traffic
+#  via the vhub. The vhub pushes any 0.0.0.0/0 it has learned (via BGP from the
+#  NVA gateway) into the spoke VM NICs as a VirtualNetworkGateway route,
+#  overriding the default Azure internet route. Transitive spoke-to-spoke routing
+#  is provided by the hub router automatically once both connections are attached.
 #------------------------------------------------------------------------------
 
 resource "azurerm_virtual_network" "spoke" {
@@ -31,5 +32,5 @@ resource "azurerm_virtual_hub_connection" "spoke" {
   name                      = "conn-${each.key}"
   virtual_hub_id            = azurerm_virtual_hub.lab.id
   remote_virtual_network_id = azurerm_virtual_network.spoke[each.key].id
-  internet_security_enabled = false
+  internet_security_enabled = true
 }

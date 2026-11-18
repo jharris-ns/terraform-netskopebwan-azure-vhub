@@ -24,28 +24,16 @@ resource "azurerm_subnet" "nva" {
 
 # Hub connection — attaches the NVA spoke to the Phase 1 vhub.
 #
-# routing.static_vnet_route injects a static 0.0.0.0/0 into the hub's default
-# route table pointing to the NVA's LAN (GE2) IP. The hub propagates this to all
-# other spoke connections, so spoke VMs send internet traffic through the NVA.
-# This is the spoke-based NVA equivalent of Routing Intent (which requires a
-# hub-hosted managed NVA resource and is not applicable here).
-#
-# With multiple gateways the first NVA's LAN IP is used as the static next hop.
-# Azure vWAN will ECMP across the BGP-learned routes from all NVA peers, but the
-# static_vnet_route only accepts a single next_hop_ip_address.
+# No static_vnet_route: 0.0.0.0/0 is advertised to the vhub via eBGP from each
+# gateway (azurerm_virtual_hub_bgp_connection). The hub learns it as
+# HubBgpConnection routes and programs it into spoke VM NICs via
+# internet_security_enabled=true on the spoke connections. This gives true ECMP
+# across all gateways — a static_vnet_route can only specify a single next hop.
 resource "azurerm_virtual_hub_connection" "nva_spoke" {
   name                      = "conn-nva-spoke"
   virtual_hub_id            = var.virtual_hub_id
   remote_virtual_network_id = azurerm_virtual_network.nva_spoke.id
   internet_security_enabled = false
-
-  routing {
-    static_vnet_route {
-      name                = "default-via-nva"
-      address_prefixes    = ["0.0.0.0/0"]
-      next_hop_ip_address = azurerm_network_interface.nva_ge2["${keys(local.nvas)[0]}-ge2"].private_ip_address
-    }
-  }
 }
 
 # Allow the hub connection to fully provision before creating BGP connections.
