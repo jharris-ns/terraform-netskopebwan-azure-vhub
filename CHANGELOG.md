@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-11-24 — SSE Monitor: Upgrade-Survivable Deployment
+
+### Problem
+
+A BWAN upgrade from the Netskope console replaces the root filesystem (`/dev/sda2`); only `/infroot` (`/dev/sda4`) survives. The SSE monitor lived entirely on the wiped filesystem (`/root/sse_monitor/`, `/etc/systemd/system/sse_monitor.service`, `/etc/logrotate.d/sse_monitor`), so after an upgrade it was gone and the gateway advertised `0.0.0.0/0` regardless of tunnel health. The runtime-only vhub route (`10.0.0.0/24 via <LAN gateway>`, main table and table 101) is also lost on any reboot.
+
+### Findings (probe output in `docs/*_results.txt`)
+
+- Docker data-root is `/infroot/docker`, so container definitions and restart policies persist.
+- A test container with `--restart unless-stopped` survived `infhostd restart-container` and a VM reboot with nothing in `/etc` or `/root`.
+- `infhostd` has no user-script hook.
+- The cloud-init `runcmd` in `scripts/user-data.sh` is not applied (`runcmd` skipped: "no applicable config is provided"), so `50-imds-route` was never written. Not yet fixed.
+- The vhub route is absent after a reboot.
+
+### Change (`vwan-lab-nva/`)
+
+- `run_command.tf` (`null_resource.sse_monitor`): files now deploy to `/infroot/sse_monitor/` (script, three `frrcmds-*.json`, new `monitor.env`). The monitor is started by a launcher container `sse_monitor` (`--restart unless-stopped --privileged --pid=host --net=host`, image `infiot_image:latest`) that runs `nsenter -t 1 -m -u -i -n -- /bin/bash /infroot/sse_monitor/sse_monitor.sh`, i.e. the script runs on the host. The legacy systemd unit, logrotate file and `/root/sse_monitor/` are removed on deploy. New triggers: `lan_ip`, `lan_gateway`, `vhub_prefix`, `launcher`.
+- `scripts/sse_monitor.sh`: paths moved to `/infroot/sse_monitor/`; re-asserts the vhub route (main + table 101) every loop and after each container start; rotates its own log at 100 MB.
+- `scripts/sse_monitor.service` and `scripts/sse_monitor.logrotate` are no longer deployed.
+
+### Validation (`docs/post_upgrade_results.txt`)
+
+After a console upgrade to R6.3.406, with no Terraform intervention: `sse_monitor` and `upgrade_canary` containers up; one monitor process; vhub route present in the main table and table 101; both vhub peers Established; only `0.0.0.0/0` advertised; `/root/sse_monitor` and the systemd unit absent.
+
+### Open items
+
+- The launcher stays bound to the pre-upgrade image (`12912a9eb8c3`, 1.45 GB, now untagged) until the monitor is re-deployed.
+- `user-data.sh` `runcmd` not applied (see Findings).
+
+### Fail-closed default route (same day, follow-up)
+
+Previously `frrcmds-user.json` permitted `0.0.0.0/0` unconditionally and the deny rule existed only while the monitor ran, so a missing monitor meant the default route was advertised regardless of tunnel health.
+
+- `run_command.tf` (`null_resource.bgp_config`): `route-map set-med-peer deny 5` + `match ip address prefix-list default` added to `frrcmds-user.json`; new `frr_policy` trigger, so the next apply re-runs the BGP config (2–3 min BGP flap).
+- `scripts/sse_monitor.sh`: reconciles its remembered state with the deny rule's presence in FRR `show running-config` each loop, with a self-test after each container start.
+- Consequence with `gateway_count = 1`: if the monitor is not running, spokes receive no default route from the gateway.
+- Tested on `vm-ntsk-gw-1`: with the monitor stopped and the container restarted, FRR loaded the deny rule and no `0.0.0.0/0` was advertised; after `docker start sse_monitor` the monitor saw 3 tunnels up and the route was re-advertised (18:19:44 UTC).
+
 ## 2026-11-12 — vWAN Lab: Documentation, Outbound BGP Filter Fix, and Routing Findings
 
 ### Documentation

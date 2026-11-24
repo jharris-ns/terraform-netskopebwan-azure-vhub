@@ -245,7 +245,7 @@ The monitor copies a JSON file into the container with `docker cp` and applies i
 ] }] }
 ```
 
-The block file is applied once after each container start so the default route is withheld from boot until the first tunnel check passes. (This differs from the AWS project, which toggles `default-originate` per neighbour.)
+**Fail-closed:** the same `deny 5` rule is also written into `frrcmds-user.json` by `null_resource.bgp_config`, so FRR loads it at every container start and the default route is withheld unless the monitor is running and has seen a tunnel up. If the monitor is missing, `0.0.0.0/0` is not advertised. Each loop the monitor reads `show running-config` and reconciles its remembered state with whether the deny rule is actually present (logged as `DRIFT`); if it cannot recognise the output it logs a `WARNING` and falls back to remembered state. The block file is still applied once after each container start, which covers gateways whose `frrcmds-user.json` predates this change. (This differs from the AWS project, which toggles `default-originate` per neighbour.)
 
 > **Note**: Comments in `sse_monitor.sh` refer to "TGW peers" — carried over from the AWS project; they apply to the hub router peers here.
 
@@ -253,20 +253,35 @@ The block file is applied once after each container start so the default route i
 
 `run_command.tf` builds a base64-encoded tar archive locally and sends it in one Run Command script:
 
-1. **Local build** — temp directory mirroring the target filesystem: `/root/sse_monitor/sse_monitor.sh`, the three `frrcmds-*.json` files (generated inline), `/etc/systemd/system/sse_monitor.service`, `/etc/logrotate.d/sse_monitor`
-2. **Tar + base64** — `tar czf - root etc | base64`
+1. **Local build** — temp directory mirroring the target filesystem: `/infroot/sse_monitor/sse_monitor.sh`, the three `frrcmds-*.json` files (generated inline) and `monitor.env` (`VHUB_PREFIX`, `LAN_GW`, `LAN_IP`)
+2. **Tar + base64** — `tar czf - infroot | base64`
 3. **Substitute payload** — `python3` replaces `__PAYLOAD__` (too large for `sed`), so `python3` is needed locally
-4. **Extract and start** — on the VM: `base64 -d | tar xz --no-overwrite-dir -C /`, `chmod 755`, `systemctl daemon-reload`, `enable`, `restart`
+4. **Remove legacy deployment** — on the VM: disable/stop the old `sse_monitor` systemd unit, delete the unit, the logrotate file and `/root/sse_monitor/`
+5. **Extract** — `base64 -d | tar xz --no-overwrite-dir -C /`, `chown -R root:root`, `chmod`
+6. **Start the launcher container** — `docker rm -f sse_monitor`, then `docker run` (below); verify it is running
 
-`--no-overwrite-dir` stops tar from resetting permissions on existing directories such as `/root`; without it `/root` becomes `755` and `sshd` rejects logins (see [Troubleshooting — Known Limitations](TROUBLESHOOTING.md#known-limitations)).
+`--no-overwrite-dir` stops tar from resetting permissions on existing directories (see [Troubleshooting — Known Limitations](TROUBLESHOOTING.md#known-limitations)).
 
-`null_resource.sse_monitor` depends on `null_resource.bgp_config`. Its triggers are VM name, ASN, both peers and `filesha256("scripts/sse_monitor.sh")` — editing the script re-deploys; editing `.service` or `.logrotate` does not.
+`null_resource.sse_monitor` depends on `null_resource.bgp_config`. Its triggers are VM name, ASN, both peers, LAN IP, LAN gateway, vhub prefix, `filesha256("scripts/sse_monitor.sh")` and a `launcher` version string — bump `launcher` after changing the `docker run` command.
 
-### Systemd Service and Log Rotation
+### Launcher Container and Log Rotation
 
-`sse_monitor.service`: `After=docker.service`, `Requires=docker.service`, `Restart=always`, `RestartSec=10`, `WantedBy=multi-user.target`.
+A BWAN upgrade replaces the root filesystem (`/dev/sda2`), wiping `/root` and `/etc`; only `/infroot` (`/dev/sda4`) survives, and `infhostd` has no user-script hook. Docker's data-root is `/infroot/docker`, so a container definition and its restart policy do survive. The monitor is therefore started by a launcher container instead of a systemd unit:
 
-`sse_monitor.logrotate`: rotates `/var/log/sse_monitor.log` at 100 MB, keeps 3 compressed archives, `copytruncate` so the running script needs no signal.
+```sh
+docker run -d --name sse_monitor --restart unless-stopped \
+  --privileged --pid=host --net=host \
+  --entrypoint /bin/sh infiot_image:latest \
+  -c 'exec nsenter -t 1 -m -u -i -n -- /bin/bash /infroot/sse_monitor/sse_monitor.sh'
+```
+
+- `nsenter -t 1` enters the host's namespaces, so the script runs on the host with the host's `bash`, `docker` and `ip`. The gateway image is used only because it is always present and contains `nsenter`.
+- No `-p`: with `--pid=host` it is redundant, and with it `nsenter` forks, so `docker stop` would leave an orphaned monitor.
+- The container stays bound to the image ID it was created from. After an upgrade that image is untagged (`<none>`) but kept on disk (~1.45 GB) until the launcher is re-created; re-deploying the monitor rebinds it to the current `infiot_image:latest`.
+
+The script re-asserts the vhub route (main table and table 101) every 10 s loop and after each container start, and rotates `/var/log/sse_monitor.log` to `.1` at 100 MB itself — there is no logrotate file.
+
+Validated 2026-11-24 through `infhostd restart-container`, a VM reboot and a console upgrade to R6.3.406 (`docs/post_upgrade_results.txt`).
 
 ## User-Data and Cloud-Init
 
@@ -282,6 +297,156 @@ After activation the `infiot_spoke` container creates an overlay interface in `1
 - **Netskope portal** (`portal.tf`) — `netskopebwan_gateway_staticroute.metadata`: `169.254.169.254/32` via `GE1`, `install = true`, `advertise = true`.
 
 The `/32` always wins by longest-prefix match.
+
+## Gateway Boot Process
+
+This section documents the full startup sequence from VM creation to a healthy, steering-active gateway. Times are approximate and from `systemd-analyze blame` on a live deployment.
+
+### Phase 1 — Linux kernel + systemd (T+0 to ~T+10s)
+
+| Time | Event |
+|---|---|
+| T+0 | Kernel boots, GRUB selects the active slot |
+| T+3s | Block device (`dev-sda2.device`) attached |
+| T+8s | `containerd.service` starts |
+| T+10s | `systemd-networkd-wait-online` unblocks (both NICs up) |
+| T+13s | `docker.service` active |
+
+### Phase 2 — Cloud-init (T+15s to ~T+50s)
+
+cloud-init runs in four stages against the `DataSourceAzure [seed=IMDS]` datasource. Provisioning media is not present (the image boots from an Azure Marketplace disk, not a provisioning ISO), so cloud-init falls back to IMDS user-data only — this means **admin passwords set via cloud-config are silently ignored**. The activation token and tenant URI are carried in user-data and do apply.
+
+| Stage | Service | Duration | What it does |
+|---|---|---|---|
+| local | `cloud-init-local.service` | ~15s | Reads datasource, discovers network config |
+| network | `cloud-init.service` | ~6s | Applies network, makes IMDS available |
+| config | `cloud-config.service` | ~2s | Sets password (not effective via IMDS path); writes activation token and tenant URI consumed by infhostd |
+| final | `cloud-final.service` | ~3s | Runs `runcmd` (see below) |
+
+**`runcmd` actions (from `scripts/user-data.sh`):**
+
+1. Pins the IMDS address to the primary NIC: `ip route add 169.254.169.254/32 dev eth0` — prevents the `169.254.0.0/16` overlay interface added later by infhostd from capturing metadata traffic.
+2. Writes `/etc/networkd-dispatcher/routable.d/50-imds-route` to re-apply the route on reboots (via the networkd-dispatcher hook).
+
+> **Known issue (2026-11-24):** these `runcmd` actions do not run. `cloud-init.log` shows `runcmd` skipped "because no applicable config is provided" and `/etc/networkd-dispatcher/routable.d/` is empty (`docs/boot_probe_results.txt`, `docs/canary_probe_results.txt`). IMDS still resolves via `10.3.0.1 dev eth0`. Cause not yet established.
+
+> On the current deployment the IMDS route already exists as an Azure fabric-injected route (`proto 196`, `metric 20`) over `10.3.0.1`. The cloud-init route (`metric 0`) takes precedence. If the route does not appear as a `dev eth0` route, check whether networkd-dispatcher ran.
+
+### Phase 3 — infhost.service starts (~T+60s)
+
+`infhost.service` (`/lib/systemd/system/infhost.service`):
+
+```ini
+[Unit]
+Description=Infiot Host Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/infhostd
+Restart=on-failure
+```
+
+On start, `infhostd` reads `/infroot/infhostd.yaml`, which defines the gateway's identity and runtime layout:
+
+| Field | Value | Notes |
+|---|---|---|
+| `inf_serial` | `0000-0010-…` | Gateway serial number |
+| `inf_uuid` | UUID | Unique gateway identity |
+| `hwmodel` | `iXEdge_AZ` | Azure NVA hardware model |
+| `interface_mappings` | `GE1=eth0`, `GE2=eth1` | Logical to physical NIC mapping |
+| `infiot_containers[0].image_tar` | `/infroot/infiot.tar` | Container image on the upgrade-safe partition |
+| `workdir` | `/infroot/workdir/` | Shared state dir between infhostd and container |
+| `activationconfig` | `/infroot/workdir/activation_config.json` | Portal-downloaded activation state |
+| `activeconfig` | `/infroot/workdir/inf_config.json` | Portal-downloaded runtime config |
+
+infhostd also:
+- Disables VLAN HW offload features on eth0/eth1 (`tx-vlan-hw-insert`, `rx-vlan-hw-parse`) — logged repeatedly to `journalctl -u infhost`
+- Starts a companion process: `infhost_stats.service` (`/usr/bin/infhostd stats-collector`)
+
+Two infhostd processes will be running: the main daemon (`/bin/infhostd`) and the stats collector (`/usr/bin/infhostd stats-collector`).
+
+### Phase 4 — Container start (~T+4 min)
+
+infhostd starts the `infiot_spoke` Docker container from the image stored at `/infroot/infiot.tar` (loaded into the Docker store in `/infroot/docker/`). The container runs with host networking (`--hostnet`) so it can configure NICs and routes on the host network namespace directly.
+
+```
+Created: 2026-11-24T10:07:01Z   (VM kernel started ~10:03:07)
+  → ~4 minutes from VM start to container running
+```
+
+Key processes inside `infiot_spoke`:
+
+| Process | Role |
+|---|---|
+| FRR (`zebra`, `bgpd`) | BGP routing daemon |
+| `iked` | Custom Netskope IKEv2/IPsec daemon (not strongSwan) |
+| `gencfg` | FRR config applier (reads `frrcmds-*.json`, called by SSE monitor) |
+| Overlay proxy | SSE tproxy for spoke traffic steering |
+| Click | Data-plane forwarding |
+
+The container mounts `/infroot/workdir/` as its working directory. This is where FRR reads `frrcmds-user.json` (our BGP configuration) and where `gencfg` sockets live.
+
+### Phase 5 — Tunnel and BGP establishment (~T+4–8 min)
+
+After container start:
+
+1. FRR daemon reads `frrcmds-user.json` from workdir and applies the BGP configuration (neighbor statements, route-maps, community lists).
+2. `iked` initiates IKEv2 to Netskope PoPs; `ESTABLISHED` SAs appear in `ikectl show sa`.
+3. FRR establishes eBGP sessions with the vhub router (`10.0.0.69`, `10.0.0.70`, AS 65515).
+4. The static host route `10.0.0.0/24 via 10.3.0.17 dev eth1` (written by the Terraform Run Command) is required for BGP traffic to reach the vhub router IPs via the LAN interface.
+
+> BGP configuration (`frrcmds-user.json`) lives in `/infroot/workdir/` and **survives firmware upgrades**. The static route to the vhub prefix does not survive a reboot or upgrade; the SSE monitor re-adds it, after which the BGP sessions re-establish without Terraform intervention.
+
+### Phase 6 — Terraform Run Commands (one-time, post-VM-ready)
+
+These run from `null_resource` provisioners in `run_command.tf` and are not part of the normal boot sequence — they execute once at deploy time (or on `-replace`).
+
+**`null_resource.bgp_config`** (runs first):
+
+1. `infhostd activate -uri $TENANT_URI -token $TOKEN` — registers the gateway with the portal; tolerates failure if already activated; waits 30s.
+2. Writes `/infroot/workdir/frrcmds-user.json` with the BGP/FRR configuration (neighbor statements, route-maps, community lists, MED).
+3. Adds static route: `ip route replace $VHUB_PREFIX via $LAN_GW dev eth1` (main table + table 101).
+4. `service infhost restart` + `infhostd restart-container`; waits 15s; re-adds routes.
+5. Polls until `infiot_spoke` is running (12 × 10s), waits 30s for FRR, verifies BGP neighbor `$BGP_PEER1` appears in `show bgp summary`.
+
+**`null_resource.sse_monitor`** (runs after bgp_config):
+
+1. Removes any legacy systemd-based monitor (`/root/sse_monitor/`, unit, logrotate file).
+2. Deploys `/infroot/sse_monitor/sse_monitor.sh`, three `frrcmds-*.json` files and `monitor.env`.
+3. Re-creates the `sse_monitor` launcher container (`--restart unless-stopped`) and verifies it is running.
+
+### Phase 7 — Steady State
+
+After both Run Commands complete, the gateway is fully operational:
+
+| Process | Location | Role |
+|---|---|---|
+| `infhostd` (main) | Host | Config refresh, interface monitoring, container lifecycle |
+| `infhostd stats-collector` | Host | Stats aggregation |
+| `infiot_spoke` container | Host network ns | FRR (BGP), iked (IPsec), overlay proxy, data plane |
+| `sse_monitor.sh` (started by the `sse_monitor` launcher container) | Host | Tunnel health monitor; controls BGP 0.0.0.0/0 advertisement; maintains the vhub route |
+| `walinuxagent.service` | Host | Azure VM Agent; required for Run Command to function |
+
+### File Locations and Upgrade Survival
+
+This is the most operationally important mapping — it determines what survives a BWAN firmware upgrade:
+
+| File/Dir | Location | Survives upgrade? | Notes |
+|---|---|---|---|
+| Gateway identity & config | `/infroot/infhostd.yaml` | Yes | Serial, UUID, interface mappings |
+| FRR/BGP config | `/infroot/workdir/frrcmds-user.json` | Yes | Written by Terraform Run Command |
+| Activation state | `/infroot/workdir/activation_config.json` | Yes | Downloaded from portal on first boot |
+| Container image | `/infroot/infiot.tar` / `/infroot/docker/` | Yes | New image written here during upgrade |
+| Runtime state (sockets, caches) | `/infroot/workdir/` | Yes | All runtime infhostd/container state |
+| Factory recovery image | `/infroot/backups/factory-swupdate.swu` | Yes | Baseline fallback |
+| SSE monitor script, FRR JSON, `monitor.env` | `/infroot/sse_monitor/` | Yes | Verified through upgrade to R6.3.406 |
+| SSE monitor launcher container | `sse_monitor` (definition in `/infroot/docker/`) | Yes | Restarted by Docker on boot; stays bound to the pre-upgrade image |
+| vhub static route | Kernel routing table (main + table 101) | **No** | Runtime-only; re-added by the SSE monitor |
+| SSE monitor log | `/var/log/sse_monitor.log` | **No** | On the root filesystem; starts fresh after upgrade |
+| Anything under `/root` or `/etc` | Root filesystem (`/dev/sda2`) | **No** | Replaced on upgrade — do not deploy there |
+
+**After an upgrade:** IPsec, BGP, the vhub route and the SSE monitor all recover without Terraform. See [Operations — After a Gateway Upgrade](OPERATIONS.md#after-a-gateway-upgrade) for the checks and optional clean-up.
 
 ## Hub Connection Static Route
 
@@ -302,6 +467,105 @@ variables.tf ──► locals.tf (local.spokes)           variables.tf ──►
                       │  manual copy into tfvars       ├──► vm.tf          Marketplace agreement, VMs (cloud-init)
                       └───────────────────────────────►├──► run_command.tf bgp_config → sse_monitor (Run Command)
                                                        └──► outputs.tf     names, IPs, connection IDs, verify commands
+```
+
+## Runtime Diagnostics
+
+The gateway runs a single container: **`infiot_spoke`**. All Netskope data-plane processes run inside it. The IKE daemon is a custom binary called **`iked`** (not strongswan or charon).
+
+### BGP Status
+
+```sh
+az vm run-command invoke \
+  --resource-group rg-ntsk-gw \
+  --name vm-ntsk-gw-1 \
+  --command-id RunShellScript \
+  --scripts "docker exec infiot_spoke vtysh -c 'show bgp summary'"
+```
+
+Healthy output shows two peers with AS 65515 (vhub router IPs `10.0.0.69`, `10.0.0.70`) in `Established` state with prefixes received, plus two iBGP peers (`169.254.0.x/400`).
+
+### IPsec Tunnel Status
+
+The IKE daemon is `iked` (custom Netskope binary). No `ipsec` or `strongswan` command is available.
+
+**Live tunnel state** (authoritative — what the SSE monitor queries):
+
+```sh
+az vm run-command invoke \
+  --resource-group rg-ntsk-gw \
+  --name vm-ntsk-gw-1 \
+  --command-id RunShellScript \
+  --scripts "docker exec infiot_spoke ikectl show sa"
+```
+
+The SSE monitor counts lines with `ESTABLISHED` matching `@infiot.com`. A non-zero count means tunnels are up and the default route will be advertised. This is the only reliable tunnel health signal — see the false indicator note below.
+
+**IKE log** (most detailed — includes IKE_INIT / IKE_AUTH exchange and failure reasons):
+
+```sh
+az vm run-command invoke \
+  --resource-group rg-ntsk-gw \
+  --name vm-ntsk-gw-1 \
+  --command-id RunShellScript \
+  --scripts "docker exec infiot_spoke tail -100 /var/log/iked.log"
+```
+
+`AUTHENTICATION_FAILED` entries in `iked.log` during `IKE_AUTH` mean the gateway's PSK/identity was rejected by a specific PoP. This is a portal-side issue — verify the gateway policy has PoP assignments configured. However, **these failures do not mean all tunnels are down**: a gateway may successfully establish SAs to some PoPs while failing others simultaneously. Always use `ikectl show sa` tunnel count, not `iked.log` failures, to judge overall tunnel health.
+
+**Tunnel interfaces** (overlay interface is UP even when IPsec auth fails — it carries control-plane traffic only):
+
+```sh
+docker exec infiot_spoke ip link show   # look for 'overlay' interface
+```
+
+### SSE Steering Verification
+
+**Do not use `pvtWanInetAccess`** in `infiot-overlay.json` as a health indicator. In testing, this flag remained `false` even while SSE was actively steering spoke traffic through Netskope PoPs. It is set by the cloud controller independently of actual forwarding behaviour and is not a reliable signal.
+
+The authoritative end-to-end check is to run a curl from a spoke VM and inspect the egress IP:
+
+```sh
+az vm run-command invoke \
+  --resource-group rg-ntsk-gw \
+  --name vm-spoke1-test01 \
+  --command-id RunShellScript \
+  --scripts "curl -s --max-time 30 http://ifconfig.me"
+```
+
+If SSE steering is active the returned IP will be a Netskope PoP address (e.g. `163.116.x.x`). If traffic is bypassing SSE it will be the GE1 public IP of the NVA gateway or the vhub's NAT IP.
+
+**BGP default route advertisement** (precondition for steering — confirm before testing from spoke):
+
+```sh
+az vm run-command invoke \
+  --resource-group rg-ntsk-gw \
+  --name vm-ntsk-gw-1 \
+  --command-id RunShellScript \
+  --scripts "docker exec infiot_spoke vtysh -c 'show ip bgp neighbors 10.0.0.69 advertised-routes'"
+```
+
+Healthy output shows `0.0.0.0/0` with next-hop `0.0.0.0` and weight `32768`.
+
+### Other Useful Logs (inside `infiot_spoke`)
+
+| Log file | Contents |
+|---|---|
+| `/var/log/iked.log` | IKEv2 exchange details, SA lifecycle |
+| `/var/log/click.log` | Data-plane / overlay forwarding |
+| `/var/log/infovlproxy.log` | Overlay proxy (SSE tproxy) |
+| `/var/log/gencfg.log` | FRR config apply output |
+| `/var/log/frrstdout.log` | FRR daemon stdout |
+| `/var/log/supervisord.log` | All processes startup/restart |
+
+### SSE Monitor Status
+
+```sh
+az vm run-command invoke \
+  --resource-group rg-ntsk-gw \
+  --name vm-ntsk-gw-1 \
+  --command-id RunShellScript \
+  --scripts "docker ps --filter name=sse_monitor; pgrep -fa sse_monitor.sh; tail -50 /var/log/sse_monitor.log"
 ```
 
 ## Pre-Commit and Validation

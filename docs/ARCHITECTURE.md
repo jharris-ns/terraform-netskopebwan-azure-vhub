@@ -216,7 +216,7 @@ Because these are scripts rather than Azure resources, Terraform re-runs them on
 | `provider.tf`, `variables.tf`, `versions.tf` | Providers, inputs, version pins |
 | `scripts/user-data.sh` | Cloud-init: passwords, tenant URL, activation token, IMDS route |
 | `scripts/azure_run_command.sh` | Helper that waits for the VM and runs a script on it |
-| `scripts/sse_monitor.sh`, `.service`, `.logrotate` | The SSE monitor and its systemd/logrotate files |
+| `scripts/sse_monitor.sh` | The SSE monitor (deployed to `/infroot/sse_monitor/`, started by the `sse_monitor` launcher container) |
 
 ## Provider Versions
 

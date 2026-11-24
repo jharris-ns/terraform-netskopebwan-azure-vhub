@@ -128,9 +128,10 @@ docker exec infiot_spoke ikectl show sa 2>/dev/null | grep ESTABLISHED | grep "@
 **Check the monitor itself is alive**:
 
 ```sh
-systemctl status sse_monitor              # active (running)?
+docker ps --filter name=sse_monitor       # launcher container Up?
+pgrep -fa sse_monitor.sh                  # exactly one monitor process
 tail -50 /var/log/sse_monitor.log         # "Tunnel Count=N" every 10s
-ls -la /root/sse_monitor/                 # script + three .json files
+ls -la /infroot/sse_monitor/              # script, three .json files, monitor.env
 ```
 
 If the service isn't running or files are missing, re-deploy it:
@@ -278,7 +279,7 @@ Things that look like problems but are either by design or outside this project'
 5. **One Netskope policy for all gateways.** Per-gateway policies aren't supported by this code.
 6. **Run Command output is cut off at about 4 KB.** Long outputs are truncated; run narrower commands.
 7. **Gateways are configured one at a time** during apply, so multi-gateway deployments take proportionally longer.
-8. **Restarting the container by hand clears the hub route.** `infhostd restart-container` or a reboot removes the route added in Step 3. Re-run `null_resource.bgp_config` (or add the route by hand) afterwards.
+8. **A reboot or upgrade clears the hub route.** The route added in Step 3 is runtime-only. The SSE monitor re-adds it within about 10 seconds; if the monitor is not running, re-deploy it or add the route by hand.
 9. **SSH can break after an old-style SSE monitor deploy.** Extracting the monitor's files to `/` without `--no-overwrite-dir` loosens `/root`'s permissions from `700` to `755`, and `sshd` then refuses logins. The current code has the flag. If a gateway is affected, fix it via Run Command — `--scripts "chmod 700 /root"` — then re-deploy the monitor.
 10. **Phase 1 values are copied into Phase 2 by hand.** There's no automatic link; after rebuilding the hub, update `vwan-lab-nva/terraform.tfvars` (see [Operations](OPERATIONS.md#if-you-rebuild-the-hub-phase-1)).
 11. **The `netskopebwan` provider is pinned to version 0.0.2.** Newer versions may change behaviour; test before upgrading.

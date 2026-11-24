@@ -67,9 +67,9 @@ If you changed `virtual_router_ips` in `terraform.tfvars`, you don't need `-repl
 
 ## Re-Deploying the SSE Monitor
 
-The SSE monitor is a small service on the gateway that watches the IPsec tunnels to Netskope and tells BGP to advertise the default route only while at least one tunnel is up.
+The SSE monitor is a small script on the gateway that watches the IPsec tunnels to Netskope and tells BGP to advertise the default route only while at least one tunnel is up. It also keeps the route to the hub installed. It lives in `/infroot/sse_monitor/` and is started by a launcher container named `sse_monitor`, so it survives reboots and gateway upgrades.
 
-Terraform re-deploys it automatically when `scripts/sse_monitor.sh` changes (it tracks the file's checksum). It does **not** notice changes to `sse_monitor.service` or `sse_monitor.logrotate`, so after editing those, force it:
+Terraform re-deploys it automatically when `scripts/sse_monitor.sh` or its inputs change. To force a re-deploy:
 
 ```sh
 terraform apply -replace='null_resource.sse_monitor["ntsk-gw-1"]' -var-file=terraform.tfvars
@@ -84,6 +84,23 @@ terraform apply \
   -replace='null_resource.sse_monitor["ntsk-gw-1"]' \
   -replace='null_resource.sse_monitor["ntsk-gw-2"]' \
   -var-file=terraform.tfvars
+```
+
+## After a Gateway Upgrade
+
+An upgrade from the Netskope console replaces the gateway's root filesystem. Nothing needs re-deploying: the tunnels, BGP, the hub route and the SSE monitor come back on their own (verified on the upgrade to R6.3.406). Check on the gateway:
+
+```sh
+docker ps -a --format "{{.Names}} {{.Image}} {{.Status}}"   # infiot_spoke and sse_monitor both Up
+tail -20 /var/log/sse_monitor.log                           # Tunnel Count=N every 10s
+ip route show 10.0.0.0/24                                   # via the LAN gateway, dev eth1
+docker exec infiot_spoke vtysh -c 'show bgp summary'        # both hub peers Established
+```
+
+Optional clean-up: the launcher stays bound to the pre-upgrade gateway image, which remains on disk untagged (about 1.5 GB). Re-deploying the monitor rebinds it to the new image; `docker image prune` then frees the space.
+
+```sh
+terraform apply -replace='null_resource.sse_monitor["ntsk-gw-1"]' -var-file=terraform.tfvars
 ```
 
 ## If You Rebuild the Hub (Phase 1)
@@ -161,7 +178,8 @@ Expected: `ProvisioningState` = `Succeeded`, `PeerIp` = the gateway's LAN IP (`t
 On the gateway:
 
 ```sh
-systemctl status sse_monitor                 # should be active (running)
+docker ps --filter name=sse_monitor          # launcher container should be Up
+pgrep -fa sse_monitor.sh                     # exactly one monitor process
 tail -50 /var/log/sse_monitor.log
 ```
 

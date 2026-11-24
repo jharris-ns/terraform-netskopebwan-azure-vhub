@@ -44,6 +44,7 @@ resource "null_resource" "bgp_config" {
     vhub_prefix      = local.run_configs[each.key].vhub_prefix
     activation_token = local.run_configs[each.key].activation_token
     tenant_uri       = local.run_configs[each.key].tenant_uri
+    frr_policy       = "fail-closed-v1" # bump to force a re-run when the FRR config below changes
   }
 
   provisioner "local-exec" {
@@ -108,7 +109,9 @@ cat > /infroot/workdir/frrcmds-user.json << 'FRREOF'
         "match ip address prefix-list default",
         "route-map set-med-peer permit 10",
         "match ip address prefix-list default",
-        "set metric __BGP_METRIC__"
+        "set metric __BGP_METRIC__",
+        "route-map set-med-peer deny 5",
+        "match ip address prefix-list default"
       ]
     },
     {
@@ -262,9 +265,19 @@ resource "null_resource" "sse_monitor" {
     bgp_peer1   = local.run_configs[each.key].bgp_peer1
     bgp_peer2   = local.run_configs[each.key].bgp_peer2
     bgp_asn     = local.run_configs[each.key].bgp_asn
+    lan_ip      = local.run_configs[each.key].lan_ip
+    lan_gateway = local.run_configs[each.key].lan_gateway
+    vhub_prefix = local.run_configs[each.key].vhub_prefix
     script_hash = filesha256("${path.module}/scripts/sse_monitor.sh")
+    launcher    = "nsenter-v2" # bump to force a re-deploy when the launcher command below changes
   }
 
+  # Upgrade survival: a BWAN rootfs upgrade replaces / (so /root and /etc are
+  # wiped); only /infroot survives. Everything is therefore deployed under
+  # /infroot/sse_monitor/, and the monitor is started by a launcher container
+  # ("sse_monitor", --restart unless-stopped) whose definition lives in the
+  # Docker data-root /infroot/docker. The launcher nsenters the host namespaces
+  # and runs the script on the host. No systemd unit, no logrotate file.
   provisioner "local-exec" {
     command = <<-EOT
       set -euo pipefail
@@ -273,17 +286,22 @@ resource "null_resource" "sse_monitor" {
       BGP_ASN="${local.run_configs[each.key].bgp_asn}"
       BGP_PEER1="${local.run_configs[each.key].bgp_peer1}"
       BGP_PEER2="${local.run_configs[each.key].bgp_peer2}"
+      LAN_IP="${local.run_configs[each.key].lan_ip}"
+      LAN_GW="${local.run_configs[each.key].lan_gateway}"
+      VHUB_PREFIX="${local.run_configs[each.key].vhub_prefix}"
 
       SSEDIR=$(mktemp -d)
-      mkdir -p "$SSEDIR/root/sse_monitor"
-      mkdir -p "$SSEDIR/etc/systemd/system"
-      mkdir -p "$SSEDIR/etc/logrotate.d"
+      mkdir -p "$SSEDIR/infroot/sse_monitor"
 
-      cp "${path.module}/scripts/sse_monitor.sh"        "$SSEDIR/root/sse_monitor/sse_monitor.sh"
-      cp "${path.module}/scripts/sse_monitor.service"   "$SSEDIR/etc/systemd/system/sse_monitor.service"
-      cp "${path.module}/scripts/sse_monitor.logrotate" "$SSEDIR/etc/logrotate.d/sse_monitor"
+      cp "${path.module}/scripts/sse_monitor.sh" "$SSEDIR/infroot/sse_monitor/sse_monitor.sh"
 
-      cat > "$SSEDIR/root/sse_monitor/frrcmds-block-default-redistribute.json" << 'BLKEOF'
+      cat > "$SSEDIR/infroot/sse_monitor/monitor.env" << ENVEOF
+VHUB_PREFIX="$VHUB_PREFIX"
+LAN_GW="$LAN_GW"
+LAN_IP="$LAN_IP"
+ENVEOF
+
+      cat > "$SSEDIR/infroot/sse_monitor/frrcmds-block-default-redistribute.json" << 'BLKEOF'
 {
   "frrCmdSets": [
     {
@@ -297,7 +315,7 @@ resource "null_resource" "sse_monitor" {
 }
 BLKEOF
 
-      cat > "$SSEDIR/root/sse_monitor/frrcmds-advertise-default.json" << 'ADVEOF'
+      cat > "$SSEDIR/infroot/sse_monitor/frrcmds-advertise-default.json" << 'ADVEOF'
 {
   "frrCmdSets": [
     {
@@ -310,7 +328,7 @@ BLKEOF
 }
 ADVEOF
 
-      cat > "$SSEDIR/root/sse_monitor/frrcmds-retract-default.json" << 'RETEOF'
+      cat > "$SSEDIR/infroot/sse_monitor/frrcmds-retract-default.json" << 'RETEOF'
 {
   "frrCmdSets": [
     {
@@ -324,20 +342,49 @@ ADVEOF
 }
 RETEOF
 
-      PAYLOAD=$(cd "$SSEDIR" && tar czf - root etc | base64 | tr -d '\n')
+      PAYLOAD=$(cd "$SSEDIR" && COPYFILE_DISABLE=1 tar czf - infroot | base64 | tr -d '\n')
       rm -rf "$SSEDIR"
 
       TMPSCRIPT=$(mktemp "$${TMPDIR:-/tmp}/az_sse_XXXXXX")
       mv "$TMPSCRIPT" "$${TMPSCRIPT}.sh"
       TMPSCRIPT="$${TMPSCRIPT}.sh"
-      cat > "$TMPSCRIPT" << SSEEOF
+      cat > "$TMPSCRIPT" << 'SSEEOF'
 #!/bin/bash
 set -e
+
+echo '=== Step 1: Removing legacy systemd-based monitor (if present) ==='
+systemctl disable --now sse_monitor 2>/dev/null || true
+rm -f /etc/systemd/system/sse_monitor.service /etc/logrotate.d/sse_monitor
+rm -rf /root/sse_monitor
+systemctl daemon-reload || true
+
+echo '=== Step 2: Extracting monitor files to /infroot/sse_monitor ==='
 echo '__PAYLOAD__' | base64 -d | tar xz --no-overwrite-dir -C /
-chmod 755 /root/sse_monitor/sse_monitor.sh
-systemctl daemon-reload
-systemctl enable sse_monitor
-systemctl restart sse_monitor
+chown -R root:root /infroot/sse_monitor   # tar built on macOS carries the local uid/gid
+chmod 755 /infroot/sse_monitor/sse_monitor.sh
+chmod 644 /infroot/sse_monitor/monitor.env /infroot/sse_monitor/frrcmds-*.json
+
+echo '=== Step 3: (Re)creating the launcher container ==='
+# --pid=host means the container already shares the host PID namespace, so
+# nsenter needs no -p (and therefore does not fork): the monitor's bash is the
+# container's main process and "docker stop" terminates it cleanly.
+docker rm -f sse_monitor >/dev/null 2>&1 || true
+docker run -d --name sse_monitor --restart unless-stopped \
+  --privileged --pid=host --net=host \
+  --entrypoint /bin/sh infiot_image:latest \
+  -c 'exec nsenter -t 1 -m -u -i -n -- /bin/bash /infroot/sse_monitor/sse_monitor.sh'
+
+echo '=== Step 4: Verifying ==='
+sleep 10
+STATE=$(docker inspect -f '{{.State.Running}}' sse_monitor 2>/dev/null || echo 'false')
+if [ "$STATE" != "true" ]; then
+  echo 'ERROR: sse_monitor launcher container is not running.'
+  docker logs --tail 20 sse_monitor 2>&1 || true
+  exit 1
+fi
+COUNT=$(pgrep -fc '/infroot/sse_monitor/sse_monitor.sh' || true)
+echo "Monitor processes running on host: $COUNT (expected 1; 2 briefly during a tunnel check)"
+tail -5 /var/log/sse_monitor.log 2>/dev/null || true
 echo 'SSE monitor deployed successfully.'
 SSEEOF
 
