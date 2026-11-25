@@ -16,10 +16,10 @@ Always check the relevant doc before making changes in that area.
 
 | Doc | When to read it |
 |---|---|
-| [README.md](README.md) | Overview, quick start, architecture diagram, known gotchas |
+| [README.md](README.md) | Overview, quick start, architecture diagram, known issues |
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Shortest path to a working deployment with expected outputs; 45 min end-to-end |
 | [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) | Step-by-step with explanations — full variable reference, authentication, scaling, destruction |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Topology, subnet layout, resource inventory, BGP design, Routing Intent behaviour |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Topology, subnet layout, resource inventory, BGP design, default route propagation |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Day-2: re-running BGP config / SSE monitor, gateway replacement, hub redeploy, BGP verification |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom-based: deployment errors, BGP not establishing, SSE monitor issues, known limitations |
 | [docs/RBAC_PERMISSIONS.md](docs/RBAC_PERMISSIONS.md) | Azure roles, Marketplace terms, CI/CD runner requirements |
@@ -33,7 +33,9 @@ Always check the relevant doc before making changes in that area.
 |---|---|
 | `variables.tf` | All input variable declarations |
 | `locals.tf` | NVA map auto-computed from `gateway_count`; subnet CIDR carving (`local.nvas`, `local.nva_interfaces`) |
-| `nva_spoke.tf` | NVA spoke VNet, subnets, hub connection (`conn-nva-spoke`), hub BGP connections |
+| `nva_spoke.tf` | NVA spoke VNet, subnets, hub connection (`conn-nva-spoke`) |
+| `vhub_bgp.tf` | Hub BGP connection per gateway (GE2 IP) |
+| `nsg.tf` | Public and private NSGs and subnet associations |
 | `interfaces.tf` | NICs and Public IPs (GE1 WAN + GE2 LAN per gateway) |
 | `vm.tf` | Azure VMs (Netskope Marketplace image, cloud-init) |
 | `portal.tf` | Netskope portal resources: gateways, interfaces, IMDS static route, BGP peers, activation |
@@ -45,7 +47,7 @@ Always check the relevant doc before making changes in that area.
 | `terraform.tfvars` | Live deployment values — **gitignored, never commit** |
 | `scripts/user-data.sh` | Cloud-init: gateway password, tenant URL, activation token |
 | `scripts/azure_run_command.sh` | Run Command helper: polls VM agent, invokes script synchronously |
-| `scripts/sse_monitor.sh` | IPsec tunnel health monitor — controls BGP default route advertisement |
+| `scripts/sse_monitor.sh` | IPsec tunnel health monitor — controls BGP default route advertisement; deployed to `/infroot/sse_monitor/` and started by the `sse_monitor` launcher container |
 
 ## Current Deployed State
 
@@ -57,11 +59,11 @@ Always check the relevant doc before making changes in that area.
 | Spoke 1 | `10.1.0.0/24`, test VM `10.1.0.4` |
 | Spoke 2 | `10.2.0.0/24`, test VM `10.2.0.4` |
 | NVA spoke | `10.3.0.0/24` |
-| Gateway | `vm-ntsk-gw-1`, `Standard_DS11_v2`, Zone 3, GE2 IP `10.3.0.20` |
+| Gateways | `gateway_count` sets the number, from 1 to 4: `vm-ntsk-gw-1` to `vm-ntsk-gw-4`, `Standard_DS11_v2`. GE2 IPs are `10.3.0.20` for the first gateway and `10.3.0.52` for the second; list all with `terraform output nva_ge2_private_ips` |
 | Gateway BGP ASN | `400` |
 | Netskope policy | `absa-test` |
 
-## Critical Gotchas
+## Known Issues and Constraints
 
 ### 1. VM image is Gen1 only
 
@@ -73,7 +75,7 @@ The Netskope BWAN Marketplace image is Generation 1. Gen2-only VM sizes (e.g. `S
 az vm list-skus --location westeurope --size Standard_DS11 --zone true -o table
 ```
 
-Zone capacity is subscription-specific. Current deployment uses Zone 3 because Zones 1 and 2 are restricted for `Standard_DS11_v2` in this subscription. Always verify before choosing a zone.
+Zone capacity is subscription-specific. The gateway VMs are currently created without an availability zone (`zones` is null on the running VMs, checked 2026-11-25); the GE1 public IPs are zone-redundant. Always verify capacity before changing the VM size or adding a zone.
 
 ### 3. The `plan {}` block is always required in `vm.tf`
 
@@ -118,7 +120,7 @@ location            = "westeurope"
 resource_group_name = "rg-ntsk-gw"
 nva_spoke_address_space = "10.3.0.0/24"
 
-gateway_count   = 1
+gateway_count   = 1   # 1 to 4
 gateway_prefix  = "ntsk-gw"
 gateway_bgp_asn = 400
 gateway_policy  = "absa-test"
@@ -136,3 +138,5 @@ terraform apply -replace='null_resource.bgp_config["ntsk-gw-1"]' -var-file=terra
 # Force SSE monitor re-deploy
 terraform apply -replace='null_resource.sse_monitor["ntsk-gw-1"]' -var-file=terraform.tfvars
 ```
+
+With more than one gateway, repeat `-replace` for each gateway key (`ntsk-gw-1` to `ntsk-gw-4`).

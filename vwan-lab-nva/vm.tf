@@ -2,14 +2,14 @@
 #  NVA VMs — Netskope BWAN Marketplace image
 #
 #  Image: netskopebwan / netskope-unified-sase-virtual-gateway /
-#         netskope-unified-sase-virtual-gateway-r6_2_x / 6.2.5
+#         netskope-unified-sase-virtual-gateway-r6_3_x / 6.3.371
 #  Generation: 1 only — do not use Gen2-only VM sizes.
 #
 #  Before first deploy, accept Marketplace terms (or set accept_plan = true):
 #    az vm image terms accept \
 #      --publisher netskopebwan \
 #      --offer netskope-unified-sase-virtual-gateway \
-#      --plan netskope-unified-sase-virtual-gateway-r6_2_x
+#      --plan netskope-unified-sase-virtual-gateway-r6_3_x
 #
 #  The plan {} block is always required for Marketplace VMs in azurerm,
 #  regardless of whether accept_plan = true.
@@ -21,7 +21,7 @@ resource "azurerm_marketplace_agreement" "netskope_bwan" {
   count     = var.accept_plan ? 1 : 0
   publisher = "netskopebwan"
   offer     = "netskope-unified-sase-virtual-gateway"
-  plan      = "netskope-unified-sase-virtual-gateway-r6_2_x"
+  plan      = "netskope-unified-sase-virtual-gateway-r6_3_x"
 }
 
 resource "azurerm_linux_virtual_machine" "nva" {
@@ -56,13 +56,13 @@ resource "azurerm_linux_virtual_machine" "nva" {
   source_image_reference {
     publisher = "netskopebwan"
     offer     = "netskope-unified-sase-virtual-gateway"
-    sku       = "netskope-unified-sase-virtual-gateway-r6_2_x"
-    version   = "6.2.5"
+    sku       = "netskope-unified-sase-virtual-gateway-r6_3_x"
+    version   = "6.3.371"
   }
 
   # Required for all Marketplace VMs — Azure validates this regardless of accept_plan.
   plan {
-    name      = "netskope-unified-sase-virtual-gateway-r6_2_x"
+    name      = "netskope-unified-sase-virtual-gateway-r6_3_x"
     publisher = "netskopebwan"
     product   = "netskope-unified-sase-virtual-gateway"
   }

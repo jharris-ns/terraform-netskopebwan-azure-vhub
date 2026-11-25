@@ -1,6 +1,6 @@
 # Netskope SD-WAN Gateway — Azure Virtual WAN Terraform Project
 
-Deploys and activates Netskope SD-WAN (BWAN) gateways as NVA VMs in an Azure Virtual WAN spoke, with eBGP peering to the virtual hub's built-in router. This project handles the full lifecycle: Virtual WAN and hub, spoke VNets, Netskope portal configuration, VM provisioning, and post-launch FRR/BGP and SSE monitor setup via Azure Run Command.
+Deploys and activates Netskope SD-WAN (BWAN) gateways as NVA VMs in an Azure Virtual WAN spoke, with eBGP peering to the virtual hub's built-in router. This project covers the full lifecycle: Virtual WAN and hub, spoke VNets, Netskope portal configuration, VM provisioning, and post-launch FRR/BGP and SSE monitor setup via Azure Run Command.
 
 ## When to Use This Project
 
@@ -12,9 +12,9 @@ BWAN gateways run as Azure VMs in a dedicated spoke VNet connected to the virtua
 
 The gateway advertises `0.0.0.0/0` to the hub with MED 10. An SSE monitor on each gateway checks IPsec tunnel state every 10 seconds: with tunnels up the default route is advertised; with tunnels down it is withdrawn, so a gateway without a path to Netskope never attracts traffic.
 
-### Routing Intent Limitation
+### Default Route Propagation
 
-Azure Virtual WAN learns `0.0.0.0/0` from the NVA and holds it in the hub's BGP RIB, but **does not program it into spoke VNet effective routes without Routing Intent**. Routing Intent requires a hub-hosted managed NVA, which Netskope BWAN does not support. This is intentional, documented Azure behaviour ([About BGP peering with a virtual hub](https://learn.microsoft.com/en-us/azure/virtual-wan/scenario-bgp-peering-hub)), not a deployment fault. The BGP session and route advertisement are still verified and correct. See [Architecture — Routing Behaviour](docs/ARCHITECTURE.md#routing-behaviour) for the two patterns.
+The hub learns `0.0.0.0/0` from the gateways over BGP. The spoke connections in Phase 1 are created with `internet_security_enabled = true`, so the hub passes that default route to the spoke VNets and spoke internet traffic is sent to the gateways. Routing Intent is not required. With more than one gateway, the hub balances traffic across them (ECMP). See [Architecture — Routing Behaviour](docs/ARCHITECTURE.md#routing-behaviour).
 
 ### Key Benefits
 
@@ -23,11 +23,11 @@ Azure Virtual WAN learns `0.0.0.0/0` from the NVA and holds it in the hub's BGP 
 - **Tunnel-aware advertisement** — the SSE monitor withdraws the default route when no IPsec tunnel to Netskope NewEdge is established, preventing a blackhole
 - **Scales by count** — `gateway_count` drives subnets, NICs, VMs, portal objects and hub BGP connections (1–4 gateways)
 
-## What's New
+## Recent Changes
 
 ### 2026-11-12 — Verified deployment and BGP outbound filter fix
 
-Deployed to westeurope with one `Standard_DS11_v2` gateway in Zone 3. Both hub BGP sessions and both Netskope overlay sessions established; the gateway advertised exactly `0.0.0.0/0` (MED 10) to both hub router IPs.
+Deployed to westeurope with one `Standard_DS11_v2` gateway. Both hub BGP sessions and both Netskope overlay sessions established; the gateway advertised exactly `0.0.0.0/0` (MED 10) to both hub router IPs.
 
 The `set-med-peer` outbound route-map had no `match` clause and re-advertised spoke VNet prefixes learned from the hub back to it. Fixed by adding `match ip address prefix-list default` in `vwan-lab-nva/run_command.tf`. See the [CHANGELOG](CHANGELOG.md).
 
@@ -48,9 +48,11 @@ Two Terraform workspaces, applied in order:
 - Registers gateways in the Netskope SD-WAN portal (policy, interfaces, IMDS static route, BGP peers, activation)
 - Deploys 1–4 gateway VMs from the Netskope Marketplace image with cloud-init activation
 - Pushes FRR/BGP and networking configuration to each gateway via Azure Run Command
-- Deploys the SSE monitor (systemd service) that controls default route advertisement
+- Deploys the SSE monitor (started by a launcher container, so it survives gateway upgrades) that controls default route advertisement
 
 ## Architecture
+
+![Azure architecture: Virtual WAN hub, two test spokes and the NVA spoke with the Netskope BWAN gateway, eBGP to the hub router and IPsec to Netskope NewEdge](docs/images/azure-vwan-netskope-architecture.png)
 
 ```
                        Azure Virtual WAN
@@ -115,7 +117,7 @@ See [docs/QUICKSTART.md](docs/QUICKSTART.md) for a step-by-step walkthrough with
   az vm image terms accept \
     --publisher netskopebwan \
     --offer netskope-unified-sase-virtual-gateway \
-    --plan netskope-unified-sase-virtual-gateway-r6_2_x
+    --plan netskope-unified-sase-virtual-gateway-r6_3_x
   ```
 
 ## VM Image
@@ -124,8 +126,8 @@ See [docs/QUICKSTART.md](docs/QUICKSTART.md) for a step-by-step walkthrough with
 |---|---|
 | Publisher | `netskopebwan` |
 | Offer | `netskope-unified-sase-virtual-gateway` |
-| SKU / Plan | `netskope-unified-sase-virtual-gateway-r6_2_x` |
-| Version | `6.2.5` |
+| SKU / Plan | `netskope-unified-sase-virtual-gateway-r6_3_x` |
+| Version | `6.3.371` |
 | Generation | Gen1 |
 
 **Important**: Gen1 only. Gen2-only sizes (e.g. `Standard_D2s_v6`) fail with `VMMarketplaceInvalidInput`. Tested size: `Standard_DS11_v2`. Check zone availability before deploying:
@@ -145,7 +147,7 @@ az vm list-skus --location <region> --size Standard_DS11 --zone true -o table
 | `virtual_router_asn` | Hub router ASN (always 65515) — **Phase 2 input** |
 | `virtual_hub_name`, `virtual_wan_id`, `resource_group_name`, `location` | Lab context |
 | `spoke_vnet_ids`, `spoke_vnet_address_spaces`, `spoke_subnet_ids`, `hub_connection_ids` | Per-spoke details |
-| `vm_private_ips`, `vm_public_ips` | Test VM addresses |
+| `vm_private_ips` | Test VM private addresses (the test VMs have no public IP) |
 
 ### Phase 2 (`vwan-lab-nva/`)
 
@@ -160,11 +162,11 @@ az vm list-skus --location <region> --size Standard_DS11 --zone true -o table
 
 ## Documentation
 
-Start with the **Quick Start** to get deployed, then refer to the **Deployment Guide** for the full configuration reference.
+Start with the **Quick Start** to complete a first deployment, then refer to the **Deployment Guide** for the full configuration reference.
 
 | Document | Description |
 |---|---|
-| [Quick Start](docs/QUICKSTART.md) | Get deployed fast — Phase 1, Phase 2, credentials, verify |
+| [Quick Start](docs/QUICKSTART.md) | Shortest path to a working deployment: Phase 1, Phase 2, credentials, verify |
 | [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) | Full variable reference for both workspaces, authentication, scaling, destruction |
 | [Architecture](docs/ARCHITECTURE.md) | Topology, subnet layout, resource inventory, BGP design, routing behaviour, security layers |
 | [Operations](docs/OPERATIONS.md) | Day-2: re-running BGP config, SSE monitor re-deploy, gateway access, BGP verification, hub redeploy |

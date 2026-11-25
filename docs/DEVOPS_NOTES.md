@@ -1,24 +1,24 @@
 # DevOps Notes
 
-How the Terraform code is put together, for anyone who needs to change it rather than just run it. This is the most technical document in `docs/`; if you're deploying or operating the project rather than editing it, you don't need it — start with the [Deployment Guide](DEPLOYMENT_GUIDE.md) or [Operations](OPERATIONS.md).
+This document describes how the Terraform code is structured. It is intended for readers who need to change the code, not only run it. This is the most technical document in `docs/`. If you are deploying or operating the project and not editing it, you do not need this document; start with the [Deployment Guide](DEPLOYMENT_GUIDE.md) or [Operations](OPERATIONS.md).
 
 File and resource names refer to `vwan-lab-nva/` (Phase 2) unless stated otherwise.
 
 ## Orientation
 
-If you're new to Terraform, three ideas make the rest of this page readable:
+If you are new to Terraform, the following three concepts are needed to follow the rest of this page:
 
-- **A `local` is a computed value.** `locals.tf` takes the handful of inputs you set in `terraform.tfvars` (how many gateways, what address range) and works out everything derived from them — subnet CIDRs, names, which IP is the gateway for which subnet. Resources then read from those locals instead of repeating the arithmetic.
-- **`for_each` makes N copies of a resource from a map.** Almost every resource here says `for_each = local.nvas` (or a map derived from it), which is how one block of code produces one VM, or one subnet, or one BGP connection per gateway. The map's keys (`ntsk-gw-1`, `ntsk-gw-2`) become part of each resource's address, e.g. `azurerm_linux_virtual_machine.nva["ntsk-gw-1"]`.
-- **A `null_resource` with a `local-exec` provisioner is a script Terraform runs for you.** It isn't an Azure resource; it's how the project pushes configuration onto the gateway after the VM boots. It re-runs only when something in its `triggers` list changes.
+- **A `local` is a computed value.** `locals.tf` takes the few inputs set in `terraform.tfvars` (the number of gateways and the address range) and calculates all values derived from them: subnet CIDRs, names, and the gateway IP of each subnet. Resources then read from those locals instead of repeating the calculation.
+- **`for_each` makes N copies of a resource from a map.** Almost every resource here uses `for_each = local.nvas` (or a map derived from it). This is how one block of code produces one VM, one subnet or one BGP connection per gateway. The map's keys (`ntsk-gw-1`, `ntsk-gw-2`) become part of each resource's address, e.g. `azurerm_linux_virtual_machine.nva["ntsk-gw-1"]`.
+- **A `null_resource` with a `local-exec` provisioner is a script that Terraform runs.** It is not an Azure resource. The project uses it to apply configuration to the gateway after the VM boots. It re-runs only when something in its `triggers` list changes.
 
-Everything below is detail on those three ideas as applied here.
+The rest of this document describes how these three concepts are applied in this project.
 
 ## Terraform Patterns
 
 ### Dynamic Gateway Map (`locals.tf`)
 
-The core design pattern is a computed `local.nvas` map that generates all per-gateway configuration from `gateway_count`. It is the single source of truth consumed by every resource file — adding a gateway requires only incrementing `gateway_count`.
+The core design pattern is a computed `local.nvas` map that generates all per-gateway configuration from `gateway_count`. It is the single source of truth consumed by every resource file, so adding a gateway requires only incrementing `gateway_count`.
 
 ```hcl
 locals {
@@ -92,11 +92,11 @@ nva_bgp_peers = merge([
 
 ### Phase 1 → Phase 2 Handoff
 
-Phase 2 takes the hub ID and router IPs as plain variables rather than reading Phase 1 state. This keeps the workspaces independent (Phase 1 can be a long-lived lab while Phase 2 is destroyed and rebuilt) at the cost of a manual copy step. A `terraform_remote_state` alternative is sketched in [State Management](STATE_MANAGEMENT.md#optional-stop-copying-phase-1-values-by-hand).
+Phase 2 takes the hub ID and router IPs as plain variables rather than reading Phase 1 state. This keeps the workspaces independent (Phase 1 can be a long-lived lab while Phase 2 is destroyed and rebuilt) at the cost of a manual copy step. A `terraform_remote_state` alternative is outlined in [State Management](STATE_MANAGEMENT.md#optional-read-phase-1-outputs-automatically).
 
 ### Phase 1 Spoke Map (`vwan-lab/locals.tf`)
 
-Phase 1 uses the same pattern with a hand-written `local.spokes` map (`spoke1`, `spoke2`) holding all per-spoke names and CIDRs. VNets, subnets, hub connections, NSGs, NICs, public IPs and VMs all `for_each` over it; a third test spoke would be a new entry in the map.
+Phase 1 uses the same pattern with a manually written `local.spokes` map (`spoke1`, `spoke2`) holding all per-spoke names and CIDRs. VNets, subnets, hub connections, NSGs, NICs, public IPs and VMs all `for_each` over it; a third test spoke would be a new entry in the map.
 
 ## Provider Internals
 
@@ -162,11 +162,12 @@ The LAN interface name is detected at run time (`ip -o addr show | awk ...`) rat
 
 The JSON written in step 2 contains, in order:
 
-- Community list `HA_COMMUNITY` (`47474:47474`)
-- `ip prefix-list default` permitting `0.0.0.0/0`; `route-map advertise permit 10` matching it; **`route-map set-med-peer permit 10` with `match ip address prefix-list default` and `set metric <bgp_metric>`** — the `match` is what restricts outbound advertisement to the default route (see [CHANGELOG](../CHANGELOG.md))
-- `router bgp <gateway_bgp_asn>` with two hub neighbours: `remote-as 65515`, `disable-connected-check`, `ebgp-multihop 2`, `route-map set-med-peer out`
-- `To-Ctrlr-1..4 deny 5` matching the default prefix-list — keeps the default route off the Netskope overlay controllers
-- `From-Ctrlr-1..3 deny 6` matching `HA_COMMUNITY`; `To-Ctrlr-1..4 permit 10` setting the community additively
+- `ip prefix-list default` permitting `0.0.0.0/0`
+- `route-map advertise permit 10` matching that prefix-list. The gateway's built-in FRR configuration uses `route-map advertise` to filter `redistribute kernel`, `redistribute connected` and `redistribute static` (built-in entries `permit 1` and `permit 2`). This added entry is what allows the default route to be redistributed into BGP, so it must stay (`docs/verification/08_frr_minimum_test.txt`, FRR 6.0.3)
+- **`route-map set-med-peer permit 10` with `match ip address prefix-list default` and `set metric <bgp_metric>`** — the `match` is what restricts outbound advertisement to the default route (see [CHANGELOG](../CHANGELOG.md)); then `route-map set-med-peer deny 5` matching the same prefix-list, which withholds the default route until the SSE monitor removes it (fail-closed)
+- `router bgp <gateway_bgp_asn>` with two hub neighbours: `remote-as 65515`, `disable-connected-check`, `ebgp-multihop 255`, `route-map set-med-peer out`
+
+The file is additive: its commands run on top of the gateway's built-in FRR configuration (FRR 6.0.3) and do not replace it. Earlier versions also added `To-Ctrlr-1..4 deny 5` entries to keep the default route away from the Netskope controller peers. These were removed on 2026-11-25, so the gateway now also advertises `0.0.0.0/0` to the two `169.254.0.x` controller peers (`docs/verification/08_frr_minimum_test.txt`).
 
 `default-originate` is not used. Default route advertisement is controlled by the SSE monitor through a deny clause on `set-med-peer` (below).
 
@@ -193,7 +194,7 @@ The gateway script is a single-quoted heredoc containing `__PLACEHOLDER__` token
 
 ### Re-run Triggers
 
-`null_resource.bgp_config` re-runs only when its `triggers` change: VM name, LAN IP and gateway, both hub router IPs, ASN, metric, hub prefix, activation token, tenant URI. Force with `-replace`.
+`null_resource.bgp_config` re-runs only when its `triggers` change: VM name, LAN IP and gateway, both hub router IPs, ASN, metric, hub prefix, activation token, tenant URI, and the `frr_policy` version string (bump it after changing the FRR configuration). Force with `-replace`.
 
 ## SSE Monitor
 
@@ -260,7 +261,7 @@ The monitor copies a JSON file into the container with `docker cp` and applies i
 5. **Extract** — `base64 -d | tar xz --no-overwrite-dir -C /`, `chown -R root:root`, `chmod`
 6. **Start the launcher container** — `docker rm -f sse_monitor`, then `docker run` (below); verify it is running
 
-`--no-overwrite-dir` stops tar from resetting permissions on existing directories (see [Troubleshooting — Known Limitations](TROUBLESHOOTING.md#known-limitations)).
+`--no-overwrite-dir` stops tar from resetting permissions on existing directories. The earlier deployment extracted files under `/root`, where this mattered for `sshd`; the current payload contains only `/infroot/sse_monitor/`.
 
 `null_resource.sse_monitor` depends on `null_resource.bgp_config`. Its triggers are VM name, ASN, both peers, LAN IP, LAN gateway, vhub prefix, `filesha256("scripts/sse_monitor.sh")` and a `launcher` version string — bump `launcher` after changing the `docker run` command.
 
@@ -281,22 +282,22 @@ docker run -d --name sse_monitor --restart unless-stopped \
 
 The script re-asserts the vhub route (main table and table 101) every 10 s loop and after each container start, and rotates `/var/log/sse_monitor.log` to `.1` at 100 MB itself — there is no logrotate file.
 
-Validated 2026-11-24 through `infhostd restart-container`, a VM reboot and a console upgrade to R6.3.406 (`docs/post_upgrade_results.txt`).
+Validated 2026-11-24 through `infhostd restart-container`, a VM reboot and a console upgrade from the 6.3.371 image to R6.3.406 (`docs/post_upgrade_results.txt`). Validated again on 2026-11-25 with the fail-closed configuration on two upgraded gateways (`docs/verification/`): launcher and monitor running, hub route present, only `0.0.0.0/0` advertised to the hub, no warnings in the monitor log. On both gateways the pre-upgrade image (1.53 GB) was still on disk, held by the launcher.
 
 ## User-Data and Cloud-Init
 
-`scripts/user-data.sh` is a cloud-config document rendered with `templatefile()` into `custom_data` in `vm.tf`. It sets the gateway console password, provides the tenant URL and activation token (consumed by the BWAN image on first boot), and pins the IMDS route. No agent install is needed — the Azure VM Agent is pre-installed.
+`scripts/user-data.sh` is a cloud-config document rendered with `templatefile()` into `custom_data` in `vm.tf`. It is intended to set the gateway console password, provide the tenant URL and activation token, and pin the IMDS route. On the tested image the password and the `runcmd` steps are not applied (see Gateway Boot Process, Phase 2). No agent install is needed — the Azure VM Agent is pre-installed.
 
 `custom_data` contains the gateway password and activation token; `lifecycle { ignore_changes = [custom_data] }` prevents a later token change from recreating the VM.
 
 ### IMDS Route Fix
 
-After activation the `infiot_spoke` container creates an overlay interface in `169.254.0.0/16`, whose connected route would capture `169.254.169.254` (Azure IMDS). The fix is applied twice:
+After activation the `infiot_spoke` container creates an overlay interface in `169.254.0.0/16`, whose connected route would capture `169.254.169.254` (Azure IMDS). Two fixes are defined. Only the portal route is effective at present, because the cloud-init `runcmd` does not run (see the known issue under Gateway Boot Process, Phase 2):
 
 - **Cloud-init** — `ip route add 169.254.169.254/32 dev <primary-NIC>` plus a `networkd-dispatcher` hook for persistence. The primary NIC is found as link index 2 (`awk '/^2:/'`).
 - **Netskope portal** (`portal.tf`) — `netskopebwan_gateway_staticroute.metadata`: `169.254.169.254/32` via `GE1`, `install = true`, `advertise = true`.
 
-The `/32` always wins by longest-prefix match.
+The `/32` route always takes precedence by longest-prefix match.
 
 ## Gateway Boot Process
 
@@ -328,9 +329,9 @@ cloud-init runs in four stages against the `DataSourceAzure [seed=IMDS]` datasou
 1. Pins the IMDS address to the primary NIC: `ip route add 169.254.169.254/32 dev eth0` — prevents the `169.254.0.0/16` overlay interface added later by infhostd from capturing metadata traffic.
 2. Writes `/etc/networkd-dispatcher/routable.d/50-imds-route` to re-apply the route on reboots (via the networkd-dispatcher hook).
 
-> **Known issue (2026-11-24):** these `runcmd` actions do not run. `cloud-init.log` shows `runcmd` skipped "because no applicable config is provided" and `/etc/networkd-dispatcher/routable.d/` is empty (`docs/boot_probe_results.txt`, `docs/canary_probe_results.txt`). IMDS still resolves via `10.3.0.1 dev eth0`. Cause not yet established.
+> **Known issue (2026-11-24, re-checked 2026-11-25):** these `runcmd` actions do not run. `cloud-init.log` shows `runcmd` skipped "because no applicable config is provided" and `/etc/networkd-dispatcher/routable.d/` is empty. `cloud-init query userdata` returns an empty first line on both gateways, so cloud-init appears to receive no user-data at all; the `custom_data` set in `vm.tf` is not reaching it. A possible fix, not yet tested, is to pass the same content through the VM's `user_data` argument. IMDS still resolves via the WAN interface. Evidence: `docs/boot_probe_results.txt`, `docs/canary_probe_results.txt`, `docs/verification/02_vm-ntsk-gw-1.txt`.
 
-> On the current deployment the IMDS route already exists as an Azure fabric-injected route (`proto 196`, `metric 20`) over `10.3.0.1`. The cloud-init route (`metric 0`) takes precedence. If the route does not appear as a `dev eth0` route, check whether networkd-dispatcher ran.
+> On the current deployment the IMDS route already exists as an Azure fabric-injected route (`proto 196`, `metric 20`) over `10.3.0.1`. The cloud-init route (`metric 0`) would take precedence if `runcmd` ran.
 
 ### Phase 3 — infhost.service starts (~T+60s)
 
@@ -385,13 +386,13 @@ Key processes inside `infiot_spoke`:
 | Overlay proxy | SSE tproxy for spoke traffic steering |
 | Click | Data-plane forwarding |
 
-The container mounts `/infroot/workdir/` as its working directory. This is where FRR reads `frrcmds-user.json` (our BGP configuration) and where `gencfg` sockets live.
+The container mounts `/infroot/workdir/` as its working directory. This is where FRR reads `frrcmds-user.json` (the BGP configuration for this project) and where `gencfg` sockets live.
 
 ### Phase 5 — Tunnel and BGP establishment (~T+4–8 min)
 
 After container start:
 
-1. FRR daemon reads `frrcmds-user.json` from workdir and applies the BGP configuration (neighbor statements, route-maps, community lists).
+1. FRR daemon reads `frrcmds-user.json` from workdir and applies the BGP configuration (neighbor statements, route-maps).
 2. `iked` initiates IKEv2 to Netskope PoPs; `ESTABLISHED` SAs appear in `ikectl show sa`.
 3. FRR establishes eBGP sessions with the vhub router (`10.0.0.69`, `10.0.0.70`, AS 65515).
 4. The static host route `10.0.0.0/24 via 10.3.0.17 dev eth1` (written by the Terraform Run Command) is required for BGP traffic to reach the vhub router IPs via the LAN interface.
@@ -405,7 +406,7 @@ These run from `null_resource` provisioners in `run_command.tf` and are not part
 **`null_resource.bgp_config`** (runs first):
 
 1. `infhostd activate -uri $TENANT_URI -token $TOKEN` — registers the gateway with the portal; tolerates failure if already activated; waits 30s.
-2. Writes `/infroot/workdir/frrcmds-user.json` with the BGP/FRR configuration (neighbor statements, route-maps, community lists, MED).
+2. Writes `/infroot/workdir/frrcmds-user.json` with the BGP/FRR configuration (neighbor statements, route-maps, MED).
 3. Adds static route: `ip route replace $VHUB_PREFIX via $LAN_GW dev eth1` (main table + table 101).
 4. `service infhost restart` + `infhostd restart-container`; waits 15s; re-adds routes.
 5. Polls until `infiot_spoke` is running (12 × 10s), waits 30s for FRR, verifies BGP neighbor `$BGP_PEER1` appears in `show bgp summary`.
@@ -430,7 +431,7 @@ After both Run Commands complete, the gateway is fully operational:
 
 ### File Locations and Upgrade Survival
 
-This is the most operationally important mapping — it determines what survives a BWAN firmware upgrade:
+This mapping is the most important for operations. It determines what survives a BWAN firmware upgrade:
 
 | File/Dir | Location | Survives upgrade? | Notes |
 |---|---|---|---|
@@ -450,7 +451,7 @@ This is the most operationally important mapping — it determines what survives
 
 ## Hub Connection Static Route
 
-`nva_spoke.tf` adds a `static_vnet_route` (`0.0.0.0/0 → first gateway GE2 IP`) to `conn-nva-spoke`. Testing showed this is a local routing override for that connection only — it does not inject into the hub's `defaultRouteTable` or propagate to other spokes. It is harmless and left in place; the comment block in `nva_spoke.tf` describing hub-wide propagation predates that finding.
+`nva_spoke.tf` no longer sets a `static_vnet_route` on `conn-nva-spoke`. The hub learns `0.0.0.0/0` from each gateway over BGP and passes it to the spokes through `internet_security_enabled = true` on the spoke connections (`vwan-lab/spokes.tf`). A static route accepts only one next hop, so the BGP-learned route is used to get ECMP across gateways.
 
 ## Variable Flow
 

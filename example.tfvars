@@ -56,7 +56,7 @@ gateway_prefix = "az-gw"
 #   az vm image terms accept \
 #     --publisher netskopebwan \
 #     --offer netskope-unified-sase-virtual-gateway \
-#     --plan netskope-unified-sase-virtual-gateway-r6_2_x
+#     --plan netskope-unified-sase-virtual-gateway-r6_3_x
 azure_vm_config = {
   accept_plan    = false        # set true if marketplace terms not yet accepted
   vm_size        = "Standard_D8ds_v4"

@@ -44,7 +44,7 @@ resource "null_resource" "bgp_config" {
     vhub_prefix      = local.run_configs[each.key].vhub_prefix
     activation_token = local.run_configs[each.key].activation_token
     tenant_uri       = local.run_configs[each.key].tenant_uri
-    frr_policy       = "fail-closed-v1" # bump to force a re-run when the FRR config below changes
+    frr_policy       = "fail-closed-v3" # bump to force a re-run when the FRR config below changes
   }
 
   provisioner "local-exec" {
@@ -98,12 +98,6 @@ cat > /infroot/workdir/frrcmds-user.json << 'FRREOF'
     {
       "frrCmds": [
         "conf t",
-        "ip community-list standard HA_COMMUNITY permit 47474:47474"
-      ]
-    },
-    {
-      "frrCmds": [
-        "conf t",
         "ip prefix-list default seq 5 permit 0.0.0.0/0",
         "route-map advertise permit 10",
         "match ip address prefix-list default",
@@ -120,43 +114,12 @@ cat > /infroot/workdir/frrcmds-user.json << 'FRREOF'
         "router bgp __BGP_ASN__",
         "neighbor __BGP_PEER1__ remote-as 65515",
         "neighbor __BGP_PEER1__ disable-connected-check",
-        "neighbor __BGP_PEER1__ ebgp-multihop 2",
+        "neighbor __BGP_PEER1__ ebgp-multihop 255",
         "neighbor __BGP_PEER1__ route-map set-med-peer out",
         "neighbor __BGP_PEER2__ remote-as 65515",
         "neighbor __BGP_PEER2__ disable-connected-check",
-        "neighbor __BGP_PEER2__ ebgp-multihop 2",
+        "neighbor __BGP_PEER2__ ebgp-multihop 255",
         "neighbor __BGP_PEER2__ route-map set-med-peer out"
-      ]
-    },
-    {
-      "frrCmds": [
-        "conf t",
-        "route-map To-Ctrlr-1 deny 5",
-        "match ip address prefix-list default",
-        "route-map To-Ctrlr-2 deny 5",
-        "match ip address prefix-list default",
-        "route-map To-Ctrlr-3 deny 5",
-        "match ip address prefix-list default",
-        "route-map To-Ctrlr-4 deny 5",
-        "match ip address prefix-list default"
-      ]
-    },
-    {
-      "frrCmds": [
-        "route-map From-Ctrlr-1 deny 6",
-        "match community HA_COMMUNITY",
-        "route-map From-Ctrlr-2 deny 6",
-        "match community HA_COMMUNITY",
-        "route-map From-Ctrlr-3 deny 6",
-        "match community HA_COMMUNITY",
-        "route-map To-Ctrlr-3 permit 10",
-        "set community 47474:47474 additive",
-        "route-map To-Ctrlr-2 permit 10",
-        "set community 47474:47474 additive",
-        "route-map To-Ctrlr-1 permit 10",
-        "set community 47474:47474 additive",
-        "route-map To-Ctrlr-4 permit 10",
-        "set community 47474:47474 additive"
       ]
     }
   ]

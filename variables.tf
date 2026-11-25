@@ -45,17 +45,17 @@ variable "azure_vm_config" {
     admin_password = optional(string, "")
     # Netskope BWAN Azure Marketplace image coordinates.
     # Confirmed via: az vm image list --publisher netskopebwan --all -o table
-    # Only one version is currently available (6.2.5). Use "latest" to auto-pick newest.
+    # Versions listed on 2026-11-25: 6.2.5 (r6_2_x) and 6.3.371 (r6_3_x). Use "latest" to auto-pick newest.
     image_publisher = optional(string, "netskopebwan")
     image_offer     = optional(string, "netskope-unified-sase-virtual-gateway")
-    image_sku       = optional(string, "netskope-unified-sase-virtual-gateway-r6_2_x")
-    image_version   = optional(string, "6.2.5")
+    image_sku       = optional(string, "netskope-unified-sase-virtual-gateway-r6_3_x")
+    image_version   = optional(string, "6.3.371")
     # The Netskope BWAN image has a purchase plan — terms must be accepted before first deploy.
     # Set accept_plan = true to have Terraform accept them, or pre-accept with:
     #   az vm image terms accept \
     #     --publisher netskopebwan \
     #     --offer netskope-unified-sase-virtual-gateway \
-    #     --plan netskope-unified-sase-virtual-gateway-r6_2_x
+    #     --plan netskope-unified-sase-virtual-gateway-r6_3_x
     accept_plan     = optional(bool, true)
   })
   default = {}

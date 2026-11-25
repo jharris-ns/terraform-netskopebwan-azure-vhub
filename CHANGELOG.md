@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-11-25 — Live verification on two upgraded gateways
+
+Read-only checks on `vm-ntsk-gw-1` and `vm-ntsk-gw-2` (built from 6.3.371, then upgraded from the console). Raw output is in `docs/verification/`.
+
+| Check | Result |
+|---|---|
+| Launcher container and SSE monitor after upgrade, fail-closed config | Running on both; no `WARNING`, `DRIFT` or `ERROR` in the monitor log |
+| Hub route on the gateway | Present in the main table and table 101 on both |
+| Advertised to the hub | Only `0.0.0.0/0`, MED 10, from both gateways |
+| Hub effective routes for `conn-spoke1` and `conn-spoke2` | `0.0.0.0/0` listed twice, one per gateway BGP connection (ECMP) |
+| Hub effective routes for `conn-nva-spoke` | No `0.0.0.0/0` |
+| Spoke VM network interfaces | `0.0.0.0/0` with next hop type `VirtualNetworkGateway` |
+| Gateway GE1 and GE2 network interfaces | `0.0.0.0/0` with next hop type `Internet` |
+| Spoke egress | Netskope addresses, not a gateway GE1 public IP |
+| `terraform validate` | Valid |
+| VM zones | None set on either gateway |
+
+Findings recorded in the docs: the pre-upgrade image (1.53 GB) stays on disk, held by the launcher; `cloud-init query userdata` is empty, which explains why `runcmd` never runs. Docs updated: `ARCHITECTURE.md`, `TROUBLESHOOTING.md`, `DEVOPS_NOTES.md`, `OPERATIONS.md`, `README.md`, `CLAUDE.md`, and the architecture diagram (gateway count shown as 1 to 4, zone removed).
+
+## 2026-11-25 — FRR config: controller route-map entries removed
+
+`frrcmds-user.json` (`vwan-lab-nva/run_command.tf`) no longer adds `route-map To-Ctrlr-1..4 deny 5` for the default prefix. Those entries kept the gateway's default route out of the SD-WAN overlay, which this deployment does not use. `route-map advertise permit 10` is kept: a check on a live gateway showed the built-in configuration applies `route-map advertise` to `redistribute kernel/connected/static`, so this entry is what lets the default route into BGP. The file now holds the default prefix-list, `advertise permit 10`, `set-med-peer permit 10` (match default, MED 10), `set-med-peer deny 5` (fail-closed) and the two hub neighbours. The `frr_policy` trigger is now `fail-closed-v3`, so the next apply re-runs the BGP configuration on each gateway.
+
+Tested on `vm-ntsk-gw-1` by writing the file on the gateway and restarting the container (`docs/verification/08_frr_minimum_test.txt`, FRR 6.0.3): both hub peers Established; only `0.0.0.0/0` (MED 10) advertised to the hub; the SSE monitor re-advertised with no warning; spoke egress through Netskope. Two effects of removing the entries: `0.0.0.0/0` is now also advertised to the two controller peers (it was blocked before), and the built-in `To-Ctrlr-1 permit 5` entry, which the injected `deny 5` had replaced, is back. The other gateways keep the old file until the next apply.
+
+## 2026-11-25 — Docs: Routing Intent is not required
+
+The docs previously stated that the default route could not reach the spokes without Routing Intent, and cited a Microsoft page that does not say this. The deployed solution shows otherwise: with `internet_security_enabled = true` on the spoke connections (`vwan-lab/spokes.tf`), the hub passes the BGP-learned `0.0.0.0/0` to the spokes. `README.md`, `ARCHITECTURE.md`, `TROUBLESHOOTING.md`, `DEPLOYMENT_GUIDE.md`, `QUICKSTART.md` and `DEVOPS_NOTES.md` were corrected, including the removed `static_vnet_route`. The 2026-11-12 entry below is left as written at the time.
+
+## 2026-11-25 — Marketplace image moved to 6.3
+
+- `vwan-lab-nva/vm.tf` and the root `variables.tf` defaults now use plan/SKU `netskope-unified-sase-virtual-gateway-r6_3_x`, version `6.3.371` (from `az vm image list --publisher netskopebwan --offer netskope-unified-sase-virtual-gateway --all`). Previously `r6_2_x` / `6.2.5`.
+- Terms-acceptance commands and image tables in `README.md`, `QUICKSTART.md`, `DEPLOYMENT_GUIDE.md`, `RBAC_PERMISSIONS.md`, `TROUBLESHOOTING.md` and `example.tfvars` updated to match.
+- The gateway used for the 2026-11-24 boot and upgrade tests was built from the 6.3.371 image, so this change brings the code and docs in line with what was tested. The Marketplace terms for the `r6_3_x` plan must be accepted. The 6.3.371 image is Hyper-V generation V1 (`az vm image show --query hyperVGeneration`), so the Gen1-only constraint still applies.
+
 ## 2026-11-24 — SSE Monitor: Upgrade-Survivable Deployment
 
 ### Problem
@@ -22,7 +57,7 @@ A BWAN upgrade from the Netskope console replaces the root filesystem (`/dev/sda
 
 ### Validation (`docs/post_upgrade_results.txt`)
 
-After a console upgrade to R6.3.406, with no Terraform intervention: `sse_monitor` and `upgrade_canary` containers up; one monitor process; vhub route present in the main table and table 101; both vhub peers Established; only `0.0.0.0/0` advertised; `/root/sse_monitor` and the systemd unit absent.
+On a gateway built from the 6.3.371 image, after a console upgrade to R6.3.406, with no Terraform intervention: `sse_monitor` and `upgrade_canary` containers up; one monitor process; vhub route present in the main table and table 101; both vhub peers Established; only `0.0.0.0/0` advertised; `/root/sse_monitor` and the systemd unit absent.
 
 ### Open items
 
@@ -42,7 +77,7 @@ Previously `frrcmds-user.json` permitted `0.0.0.0/0` unconditionally and the den
 
 ### Documentation
 
-Project scope narrowed to the Azure Virtual WAN deployment (`vwan-lab/` + `vwan-lab-nva/`). Documentation restructured to match the AWS project layout: a short root `README.md` plus `docs/` (Quick Start, Deployment Guide, Architecture, Operations, Troubleshooting, RBAC Permissions, State Management, DevOps Notes), and this changelog. Verification output from the 2026-11-12 deployment is summarised in [`README.md`](README.md#whats-new) and [`docs/OPERATIONS.md`](docs/OPERATIONS.md#checking-bgp-health).
+Project scope narrowed to the Azure Virtual WAN deployment (`vwan-lab/` + `vwan-lab-nva/`). Documentation restructured to match the AWS project layout: a short root `README.md` plus `docs/` (Quick Start, Deployment Guide, Architecture, Operations, Troubleshooting, RBAC Permissions, State Management, DevOps Notes), and this changelog. Verification output from the 2026-11-12 deployment is summarised in [`README.md`](README.md#recent-changes) and [`docs/OPERATIONS.md`](docs/OPERATIONS.md#checking-bgp-health).
 
 ### Problem
 

@@ -18,7 +18,7 @@ terraform apply -var-file=terraform.tfvars
 
 > Hub provisioning takes 15–30 minutes. Do not cancel during hub creation.
 
-After apply, capture the outputs for Phase 2:
+After apply, capture the outputs for Phase 2. Phase 2 also needs `vhub_address_prefix`. This is not an output: use the hub address range set in the Phase 1 `terraform.tfvars` (default `10.0.0.0/24`).
 
 ```sh
 terraform output virtual_hub_id

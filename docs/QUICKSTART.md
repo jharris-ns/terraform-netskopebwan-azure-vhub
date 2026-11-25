@@ -1,20 +1,20 @@
 # Quick Start
 
-The shortest path to a working deployment. Each step tells you what you are doing and what success looks like. If anything here is unfamiliar — what `terraform apply` does, what a `.tfvars` file is, why there are two folders — read the [Deployment Guide](DEPLOYMENT_GUIDE.md) instead; it covers the same steps with explanations.
+This guide is the shortest path to a working deployment. Each step states its purpose and the expected result. If anything here is unfamiliar (what `terraform apply` does, what a `.tfvars` file is, why there are two folders), read the [Deployment Guide](DEPLOYMENT_GUIDE.md) instead. It covers the same steps with explanations.
 
-Expect about 45 minutes end to end, most of it waiting for Azure to build the Virtual WAN hub.
+The full process takes about 45 minutes. Most of that time is spent waiting for Azure to build the Virtual WAN hub.
 
-## What You Need First
+## Prerequisites
 
-- **Tools**: Terraform >= 1.3, Azure CLI (`az`), `jq`, and an SSH key pair (`ssh-keygen` if you don't have one). macOS is the tested platform.
+- **Tools**: Terraform >= 1.3, Azure CLI (`az`), `jq`, and an SSH key pair (run `ssh-keygen` if you do not have one). macOS is the tested platform.
 - **Azure**: a subscription where you have Contributor rights.
-- **Netskope**: your tenant URL (e.g. `example.infiot.net`), a REST API token (SD-WAN portal → Accounts → REST API), and a **gateway policy already created** in the portal — Terraform looks it up by name and will not create one.
-- **Marketplace terms accepted** for the Netskope gateway image. One command, once per subscription:
+- **Netskope**: your tenant URL (e.g. `example.infiot.net`), a REST API token (SD-WAN portal → Accounts → REST API), and a **gateway policy already created** in the portal. Terraform finds the policy by name and does not create one.
+- **Marketplace terms accepted** for the Netskope gateway image. Run this command once per subscription:
   ```sh
   az vm image terms accept \
     --publisher netskopebwan \
     --offer netskope-unified-sase-virtual-gateway \
-    --plan netskope-unified-sase-virtual-gateway-r6_2_x
+    --plan netskope-unified-sase-virtual-gateway-r6_3_x
   ```
 
 ## 1. Log in to Azure
@@ -45,7 +45,7 @@ ssh_public_key_path = "~/.ssh/id_rsa.pub"
 ssh_source_address  = "1.2.3.4/32"      # your public IP (curl -s ifconfig.me) — restricts SSH to the test VMs
 ```
 
-Then:
+Then run:
 
 ```sh
 terraform init                                  # downloads the Azure plugin — once
@@ -53,9 +53,9 @@ terraform plan  -var-file=terraform.tfvars      # preview; nothing is created ye
 terraform apply -var-file=terraform.tfvars      # type "yes" when asked
 ```
 
-> **This takes 15–30 minutes**, almost all of it on `azurerm_virtual_hub.lab: Still creating...`. That is normal. Don't press Ctrl-C. If it does time out, wait for the hub to finish in the portal and run the same `apply` again.
+> **This takes 15–30 minutes**. For most of that time the output shows `azurerm_virtual_hub.lab: Still creating...`. This is normal. Do not press Ctrl-C. If the apply times out, wait for the hub to finish in the portal and run the same `apply` again.
 
-When it finishes, grab the three values Phase 2 needs:
+When the apply finishes, record the three output values that Phase 2 requires. Phase 2 also needs `vhub_address_prefix`. This is not an output: use the hub address range set in the Phase 1 `terraform.tfvars` (default `10.0.0.0/24`).
 
 ```sh
 terraform output virtual_hub_id
@@ -70,7 +70,7 @@ cd ../vwan-lab-nva
 cp example.tfvars terraform.tfvars
 ```
 
-Edit `terraform.tfvars`. Paste the Phase 1 values, point it at the same resource group and region, and name your Netskope policy:
+Edit `terraform.tfvars`. Enter the Phase 1 values, set the same resource group and region, and specify your Netskope policy:
 
 ```hcl
 # From Phase 1
@@ -93,7 +93,7 @@ vm_size     = "Standard_DS11_v2"           # Gen1-compatible — see Deployment 
 accept_plan = false                        # true only if you skipped the terms command above
 ```
 
-Secrets go in environment variables, not in the file. Run these in the same terminal:
+Set secrets as environment variables, not in the file. Run these commands in the same terminal:
 
 ```sh
 export TF_VAR_netskope_tenant_url="your-tenant.infiot.net"
@@ -101,7 +101,7 @@ export TF_VAR_netskope_tenant_token="YOUR_API_TOKEN"
 export TF_VAR_admin_password='YourOsPassword123!'   # single quotes — zsh mangles ! inside double quotes
 ```
 
-Then:
+Then run:
 
 ```sh
 terraform init
@@ -109,19 +109,19 @@ terraform plan  -var-file=terraform.tfvars
 terraform apply -var-file=terraform.tfvars
 ```
 
-This takes 10–15 minutes. Near the end you'll see Terraform run two scripts on the new VM (`null_resource.bgp_config`, then `null_resource.sse_monitor`); the first waits for the VM to boot, so a minute or two of "waiting for VM" messages is expected.
+This takes 10–15 minutes. Near the end, Terraform runs two scripts on the new VM (`null_resource.bgp_config`, then `null_resource.sse_monitor`). The first waits for the VM to boot, so "waiting for VM" messages are expected for one or two minutes.
 
-> If `plan` fails mentioning `netskopebwan_policy`, the policy name is wrong. If it fails with an authentication error, check the tenant URL and token.
+> If `plan` fails with an error that mentions `netskopebwan_policy`, the policy name is wrong. If it fails with an authentication error, check the tenant URL and token.
 
-## 4. Check It Works
+## 4. Verify the Deployment
 
-Terraform prints ready-made check commands:
+Terraform prints ready-to-run verification commands:
 
 ```sh
 terraform output bgp_verify_commands
 ```
 
-The key one shows BGP status from inside the gateway, without SSH:
+The most important command shows the BGP status from inside the gateway, without SSH:
 
 ```sh
 az vm run-command invoke \
@@ -130,7 +130,7 @@ az vm run-command invoke \
   --scripts "docker exec infiot_spoke vtysh -c 'show bgp summary'"
 ```
 
-You are looking for **four neighbours with a time in the `Up/Down` column** (not `Active` or `Idle`):
+The expected result is **four neighbours with a time in the `Up/Down` column** (not `Active` or `Idle`):
 
 ```
 Neighbor        V    AS  MsgRcvd  MsgSent  Up/Down     State/PfxRcd
@@ -142,13 +142,13 @@ Neighbor        V    AS  MsgRcvd  MsgSent  Up/Down     State/PfxRcd
 
 The gateway should also appear as activated in the Netskope SD-WAN portal.
 
-If the hub neighbours aren't up after a couple of minutes, follow the flowchart in [Troubleshooting](TROUBLESHOOTING.md).
+If the hub neighbours are not up after a few minutes, follow the flowchart in [Troubleshooting](TROUBLESHOOTING.md).
 
-> **Don't be alarmed**: if you look at a spoke's effective routes in Azure, `0.0.0.0/0` will not be there even though the gateway is advertising it. Virtual WAN deliberately withholds a BGP-learned default route from spokes unless Routing Intent is configured, which Netskope's gateway can't use. See [Architecture — Routing Behaviour](ARCHITECTURE.md#routing-behaviour).
+> **Expected behaviour**: the spokes receive `0.0.0.0/0` from the hub while the gateway advertises it, and spoke internet traffic then leaves through Netskope. See [Architecture — Routing Behaviour](ARCHITECTURE.md#routing-behaviour).
 
 ## Next Steps
 
-- [Deployment Guide](DEPLOYMENT_GUIDE.md) — the same steps with every setting explained, plus teardown
-- [Architecture](ARCHITECTURE.md) — what was built and how the pieces connect
-- [Operations](OPERATIONS.md) — changing things afterwards
-- [Troubleshooting](TROUBLESHOOTING.md) — when the BGP summary doesn't look like the one above
+- [Deployment Guide](DEPLOYMENT_GUIDE.md): the same steps with every setting explained, and how to remove the deployment
+- [Architecture](ARCHITECTURE.md): what was built and how the components connect
+- [Operations](OPERATIONS.md): changing the deployment afterwards
+- [Troubleshooting](TROUBLESHOOTING.md): when the BGP summary does not match the one above

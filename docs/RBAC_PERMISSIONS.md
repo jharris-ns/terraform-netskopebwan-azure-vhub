@@ -1,25 +1,25 @@
 # RBAC Permissions
 
-Who needs what permissions in Azure to deploy this project, and how to set it up for a pipeline.
+This document lists the Azure permissions required to deploy this project and explains how to configure them for a pipeline.
 
-## The Short Version
+## Summary
 
-One identity — yours, or a service principal for a pipeline — needs the built-in **Contributor** role on the resource group (or the subscription, if Terraform is creating the resource group). That covers everything both phases create: Virtual WAN, hub, hub connections and BGP connections, VNets, NSGs, public IPs, NICs, VMs, Marketplace agreements and Run Command.
+One identity needs the built-in **Contributor** role on the resource group (or on the subscription, if Terraform creates the resource group). This identity is either your own account or a service principal for a pipeline. The role covers all resources that both phases create: Virtual WAN, hub, hub connections and BGP connections, VNets, NSGs, public IPs, NICs, VMs, Marketplace agreements and Run Command.
 
-The gateway VMs themselves need **no** Azure permissions. Nothing in this project creates a managed identity or role assignment; the VMs never call the Azure API.
+The gateway VMs need **no** Azure permissions. This project does not create a managed identity or role assignment, and the VMs never call the Azure API.
 
-To check what you have:
+To check your current role assignments:
 
 ```sh
 az role assignment list --assignee "$(az ad signed-in-user show --query id -o tsv)" \
   --query "[].{role:roleDefinitionName, scope:scope}" -o table
 ```
 
-## Two Things That Are Easy to Miss
+## Commonly Missed Requirements
 
 ### Resource providers
 
-Azure features are grouped into "resource providers" that must be switched on once per subscription. Most subscriptions already have these, but a new one may not:
+Azure features are grouped into "resource providers" that must be registered once per subscription. Most subscriptions already have these registered, but a new subscription may not:
 
 ```sh
 az provider register --namespace Microsoft.Network
@@ -27,24 +27,24 @@ az provider register --namespace Microsoft.Compute
 az provider register --namespace Microsoft.MarketplaceOrdering   # needed to accept the image terms
 ```
 
-Registration takes a minute or two; `az provider show -n Microsoft.Network --query registrationState` should say `Registered`.
+Registration takes one to two minutes. When it is complete, `az provider show -n Microsoft.Network --query registrationState` returns `Registered`.
 
 ### Marketplace terms
 
-The Netskope gateway is a Marketplace image, and Azure requires someone to accept its terms once per subscription before a VM can be created from it. Two ways to do that:
+The Netskope gateway is a Marketplace image, and Azure requires its terms to be accepted once per subscription before a VM can be created from it. There are two ways to accept them:
 
-- **By hand, once** (recommended): run the command below with an account that has Contributor, and leave `accept_plan = false` in Phase 2.
+- **Manually, once** (recommended): run the command below with an account that has the Contributor role, and leave `accept_plan = false` in Phase 2.
   ```sh
   az vm image terms accept \
     --publisher netskopebwan \
     --offer netskope-unified-sase-virtual-gateway \
-    --plan netskope-unified-sase-virtual-gateway-r6_2_x
+    --plan netskope-unified-sase-virtual-gateway-r6_3_x
   ```
-- **Let Terraform do it**: set `accept_plan = true`. The Terraform identity then also needs rights to the `Microsoft.MarketplaceOrdering` provider — included in Contributor.
+- **Through Terraform**: set `accept_plan = true`. The Terraform identity then also needs permissions on the `Microsoft.MarketplaceOrdering` provider, which the Contributor role includes.
 
 ## Running From a Pipeline
 
-Interactive `az login` doesn't work in CI, so you use a **service principal** — an identity for automation. Create one with Contributor on the resource group and note its credentials:
+Interactive `az login` does not work in CI, so a pipeline uses a **service principal**, which is an identity for automation. Create one with the Contributor role on the resource group and record its credentials:
 
 ```sh
 az ad sp create-for-rbac --name sp-ntsk-vwan-lab \
@@ -52,9 +52,9 @@ az ad sp create-for-rbac --name sp-ntsk-vwan-lab \
   --scopes /subscriptions/<sub-id>/resourceGroups/rg-ntsk-gw
 ```
 
-Then in the pipeline, two logins are needed — this is the part people miss:
+The pipeline then needs two separate logins. This requirement is often missed:
 
-1. **Terraform's own login** reads these environment variables:
+1. **The Terraform login** reads these environment variables:
    ```sh
    export ARM_CLIENT_ID="<appId>"
    export ARM_CLIENT_SECRET="<password>"
@@ -72,9 +72,9 @@ The runner also needs:
 - **Tools**: Terraform, Azure CLI, `jq`, `python3` (used to assemble the SSE monitor payload), `tar` and `base64`.
 - **macOS-compatible `sed`**: the Phase 2 scripts use `sed -i ''`, which GNU `sed` on Linux rejects. Either run on macOS or adapt those lines in `run_command.tf`.
 - **Secrets** stored in the pipeline's secret store and exported as `TF_VAR_netskope_tenant_url`, `TF_VAR_netskope_tenant_token`, `TF_VAR_admin_password` and optionally `TF_VAR_gateway_password`.
-- **State backend access** — see [State Management](STATE_MANAGEMENT.md); the service principal needs **Storage Blob Data Contributor** on the state container.
+- **State backend access**: see [State Management](STATE_MANAGEMENT.md). The service principal needs **Storage Blob Data Contributor** on the state container.
 
-## If You Can't Use Contributor
+## Alternatives to the Contributor Role
 
 Some organisations require a narrower custom role. The resource types involved are listed in [Architecture — Resource Inventory](ARCHITECTURE.md#reference-resource-inventory); the corresponding permission families are `Microsoft.Resources/subscriptions/resourceGroups/*`, `Microsoft.Network/virtualWans/*`, `Microsoft.Network/virtualHubs/*` (which includes hub connections and BGP connections), `Microsoft.Network/virtualNetworks/*`, `Microsoft.Network/networkSecurityGroups/*`, `Microsoft.Network/publicIPAddresses/*`, `Microsoft.Network/networkInterfaces/*`, `Microsoft.Compute/virtualMachines/*` (including `runCommand/action`), plus `Microsoft.MarketplaceOrdering/offertypes/publishers/offers/plans/agreements/*` if `accept_plan = true`.
 

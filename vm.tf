@@ -7,17 +7,12 @@
 #  The Azure VM Agent is pre-installed in Azure Marketplace images.
 #  No separate agent installation is needed (unlike AWS which installs SSM agent).
 #
-#  Marketplace image (confirmed):
-#    Publisher: netskopebwan
-#    Offer:     netskope-unified-sase-virtual-gateway
-#    SKU/Plan:  netskope-unified-sase-virtual-gateway-r6_2_x
-#    Version:   6.2.5
 #
 #  IMPORTANT: Before first deploy, accept the Marketplace image terms:
 #    az vm image terms accept \
 #      --publisher netskopebwan \
 #      --offer netskope-unified-sase-virtual-gateway \
-#      --plan netskope-unified-sase-virtual-gateway-r6_2_x
+#      --plan netskope-unified-sase-virtual-gateway-r6_3_x
 #  Or set var.azure_vm_config.accept_plan = true to have Terraform do it.
 #------------------------------------------------------------------------------
 

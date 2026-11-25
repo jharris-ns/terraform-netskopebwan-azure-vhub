@@ -1,24 +1,24 @@
 # Operations
 
-What to do after the deployment is up: changing it, fixing it, checking it. Written for someone who can run `terraform apply` but may not know Terraform's finer points — each procedure explains why the commands are what they are.
+This document describes how to change, repair and check the deployment after it is running. It is written for readers who can run `terraform apply` but may not know Terraform in detail. Each procedure explains the reason for its commands.
 
-Unless stated otherwise, run commands from `vwan-lab-nva/` with your `TF_VAR_` secrets exported (see [Deployment Guide — secrets](DEPLOYMENT_GUIDE.md#32-set-the-secrets-as-environment-variables)). If you opened a new terminal since you deployed, export them again first.
+Unless stated otherwise, run commands from `vwan-lab-nva/` with your `TF_VAR_` secrets exported (see [Deployment Guide — secrets](DEPLOYMENT_GUIDE.md#32-set-the-secrets-as-environment-variables)). If you have opened a new terminal since the deployment, export them again first.
 
-## The One Terraform Concept You Need: `-replace`
+## Using Terraform `-replace`
 
-Most changes are simple: edit `terraform.tfvars`, run `terraform plan` to see the effect, run `terraform apply`. Terraform works out the difference and changes only that.
+Most changes follow the same steps: edit `terraform.tfvars`, run `terraform plan` to review the effect, then run `terraform apply`. Terraform calculates the difference and changes only the affected resources.
 
-Two resources are different. The BGP configuration and the SSE monitor are not Azure resources — they are *scripts that Terraform ran on the gateway VM once*. Terraform calls these `null_resource`s and only re-runs them if one of their inputs changes. If you want to run one again (for example, after editing the script or after the gateway lost its configuration), you tell Terraform to pretend it needs recreating:
+Two resources behave differently. The BGP configuration and the SSE monitor are not Azure resources. They are *scripts that Terraform ran on the gateway VM once*. Terraform calls these `null_resource`s and only re-runs them if one of their inputs changes. To run one again (for example, after editing the script or after the gateway lost its configuration), instruct Terraform to treat the resource as needing recreation:
 
 ```sh
 terraform apply -replace='null_resource.bgp_config["ntsk-gw-1"]' -var-file=terraform.tfvars
 ```
 
-`-replace` means "destroy and recreate this one thing". For a `null_resource`, "recreate" just means run the script again — nothing in Azure is touched. The `["ntsk-gw-1"]` part names which gateway; use `["ntsk-gw-2"]` for the second, and so on. You will see this pattern throughout this page.
+`-replace` means "destroy and recreate this one resource". For a `null_resource`, "recreate" means only that the script runs again. Nothing in Azure is changed. The `["ntsk-gw-1"]` part identifies the gateway; use `["ntsk-gw-2"]` for the second, and so on. This pattern is used throughout this page.
 
 ## Scaling: Adding or Removing a Gateway
 
-Change one number and apply:
+Change one value and apply:
 
 ```hcl
 # terraform.tfvars
@@ -30,7 +30,7 @@ terraform plan  -var-file=terraform.tfvars    # should show only additions
 terraform apply -var-file=terraform.tfvars
 ```
 
-The new gateway gets the next pair of subnets, its own VM, public IP, Netskope portal entry and hub BGP connection, and both scripts run on it. The existing gateway is not touched — the plan should show `0 to change, 0 to destroy`; if it shows anything being destroyed, stop and read the plan.
+The new gateway receives the next pair of subnets, its own VM, public IP, Netskope portal entry and hub BGP connection, and both scripts run on it. The existing gateway is not changed. The plan should show `0 to change, 0 to destroy`. If it shows any resource being destroyed, stop and review the plan.
 
 Reducing the count destroys the highest-numbered gateway(s), including their portal entries.
 
@@ -38,7 +38,7 @@ Reducing the count destroys the highest-numbered gateway(s), including their por
 
 ## Replacing a Gateway VM
 
-Use this if the VM is unhealthy, or you want a different VM size (changing `vm_size` in `terraform.tfvars` and applying does the same thing — Terraform recreates the VM because the size can't be changed in place).
+Use this procedure if the VM is unhealthy, or if a different VM size is required. Changing `vm_size` in `terraform.tfvars` and applying has the same effect: Terraform recreates the VM because the size cannot be changed in place.
 
 ```sh
 # 1. Recreate the VM
@@ -51,23 +51,23 @@ terraform apply \
   -var-file=terraform.tfvars
 ```
 
-Step 2 is needed because a fresh VM has none of the configuration the scripts installed, but Terraform doesn't know that — the scripts' inputs haven't changed. The gateway's entry in the Netskope portal (name, interfaces, BGP peers) is kept; the new VM activates against the same entry.
+Step 2 is required because a new VM has none of the configuration that the scripts installed. Terraform does not detect this, because the inputs to the scripts have not changed. The gateway's entry in the Netskope portal (name, interfaces, BGP peers) is kept, and the new VM activates against the same entry.
 
 ## Re-Running the BGP Configuration
 
-When: you edited the FRR/BGP settings in `run_command.tf`; the hub's router IPs changed; or the gateway lost its hub route after a manual restart (see Troubleshooting).
+Re-run the BGP configuration when the FRR/BGP settings in `run_command.tf` have been edited, or when the hub's router IPs have changed. The route to the hub is maintained by the SSE monitor and does not need this script after a restart.
 
 ```sh
 terraform apply -replace='null_resource.bgp_config["ntsk-gw-1"]' -var-file=terraform.tfvars
 ```
 
-What the script does on the gateway, in order: re-activates against your Netskope tenant (harmless if already active), writes the BGP configuration file, adds the route that sends hub traffic out of the LAN interface, restarts the gateway software, re-adds the route, then waits and prints `show bgp summary`. It takes 2–3 minutes and the gateway's BGP sessions drop and re-form during it — plan for that if the gateway is carrying traffic.
+The script performs these actions on the gateway, in order: re-activates against your Netskope tenant (this has no adverse effect if the gateway is already active), writes the BGP configuration file, adds the route that sends hub traffic out of the LAN interface, restarts the gateway software, re-adds the route, then waits and prints `show bgp summary`. The script takes 2–3 minutes. The gateway's BGP sessions drop and re-establish during this time, so plan for the interruption if the gateway is carrying traffic.
 
-If you changed `virtual_router_ips` in `terraform.tfvars`, you don't need `-replace` — those are inputs to the script, so Terraform re-runs it automatically.
+If you changed `virtual_router_ips` in `terraform.tfvars`, `-replace` is not required. These values are inputs to the script, so Terraform re-runs it automatically.
 
 ## Re-Deploying the SSE Monitor
 
-The SSE monitor is a small script on the gateway that watches the IPsec tunnels to Netskope and tells BGP to advertise the default route only while at least one tunnel is up. It also keeps the route to the hub installed. It lives in `/infroot/sse_monitor/` and is started by a launcher container named `sse_monitor`, so it survives reboots and gateway upgrades.
+The SSE monitor is a monitoring script on the gateway. It checks the IPsec tunnels to Netskope and allows BGP to advertise the default route only while at least one tunnel is up. It also keeps the route to the hub installed. It is stored in `/infroot/sse_monitor/` and is started by a launcher container named `sse_monitor`, so it persists across reboots and gateway upgrades.
 
 Terraform re-deploys it automatically when `scripts/sse_monitor.sh` or its inputs change. To force a re-deploy:
 
@@ -75,7 +75,7 @@ Terraform re-deploys it automatically when `scripts/sse_monitor.sh` or its input
 terraform apply -replace='null_resource.sse_monitor["ntsk-gw-1"]' -var-file=terraform.tfvars
 ```
 
-To redo everything on every gateway in one go, list each resource:
+To re-run both scripts on every gateway in a single apply, list each resource:
 
 ```sh
 terraform apply \
@@ -88,7 +88,7 @@ terraform apply \
 
 ## After a Gateway Upgrade
 
-An upgrade from the Netskope console replaces the gateway's root filesystem. Nothing needs re-deploying: the tunnels, BGP, the hub route and the SSE monitor come back on their own (verified on the upgrade to R6.3.406). Check on the gateway:
+An upgrade from the Netskope console replaces the gateway's root filesystem. No re-deployment is required: the tunnels, BGP, the hub route and the SSE monitor recover automatically (verified on upgrades from the 6.3.371 image, most recently on two gateways on 2026-11-25). Verify on the gateway:
 
 ```sh
 docker ps -a --format "{{.Names}} {{.Image}} {{.Status}}"   # infiot_spoke and sse_monitor both Up
@@ -97,32 +97,32 @@ ip route show 10.0.0.0/24                                   # via the LAN gatewa
 docker exec infiot_spoke vtysh -c 'show bgp summary'        # both hub peers Established
 ```
 
-Optional clean-up: the launcher stays bound to the pre-upgrade gateway image, which remains on disk untagged (about 1.5 GB). Re-deploying the monitor rebinds it to the new image; `docker image prune` then frees the space.
+Optional clean-up: the launcher remains bound to the pre-upgrade gateway image, which remains on disk untagged (about 1.5 GB). Re-deploying the monitor rebinds it to the new image; `docker image prune` then frees the space.
 
 ```sh
 terraform apply -replace='null_resource.sse_monitor["ntsk-gw-1"]' -var-file=terraform.tfvars
 ```
 
-## If You Rebuild the Hub (Phase 1)
+## Rebuilding the Hub (Phase 1)
 
-Destroying and recreating the Virtual WAN hub gives it a new resource ID and new router IPs. Phase 2 has copies of the old values in its `terraform.tfvars`, so:
+Destroying and recreating the Virtual WAN hub gives it a new resource ID and new router IPs. Phase 2 holds copies of the old values in its `terraform.tfvars`, so retrieve the new values:
 
 ```sh
 cd vwan-lab
 terraform output virtual_hub_id virtual_router_ips virtual_router_asn
 ```
 
-Paste the new values into `vwan-lab-nva/terraform.tfvars`, then in `vwan-lab-nva/` run `terraform plan` and `terraform apply`. Terraform will update the hub connection and BGP connections, update the BGP peers in the Netskope portal, and re-run the BGP script (its inputs changed). No `-replace` needed.
+Copy the new values into `vwan-lab-nva/terraform.tfvars` (and update `vhub_address_prefix` there if the hub address range changed), then in `vwan-lab-nva/` run `terraform plan` and `terraform apply`. Terraform updates the hub connection and BGP connections, updates the BGP peers in the Netskope portal, and re-runs the BGP script because its inputs changed. `-replace` is not required.
 
 ## Rotating the Netskope API Token
 
 1. Create a new REST API token in the SD-WAN portal (Accounts → REST API)
 2. `export TF_VAR_netskope_tenant_token="NEW_TOKEN"`
-3. Run `terraform plan` — it should say `No changes`. The token is only used to talk to the API; it isn't stored in any resource.
+3. Run `terraform plan`. It should report `No changes`. The token is used only to call the API; it is not stored in any resource.
 
-## Getting Onto a Gateway
+## Accessing a Gateway
 
-You usually don't need to. Azure Run Command lets you execute a command on the VM from your own machine and see the output, with no SSH and no open ports needed:
+Direct access is not usually required. Azure Run Command executes a command on the VM from your own machine and returns the output, without SSH or open ports:
 
 ```sh
 az vm run-command invoke \
@@ -131,9 +131,9 @@ az vm run-command invoke \
   --scripts "docker exec infiot_spoke vtysh -c 'show bgp summary'"
 ```
 
-Replace the quoted command with anything from the [gateway command reference](TROUBLESHOOTING.md#gateway-commands-quick-reference). `terraform output bgp_verify_commands` prints the most useful ones already filled in with your names.
+Replace the quoted command with any command from the [gateway command reference](TROUBLESHOOTING.md#gateway-commands-quick-reference). `terraform output bgp_verify_commands` prints the most useful commands with your resource names already filled in.
 
-If you do want a shell, SSH to the gateway's public IP as the OS user `netskope` with the `TF_VAR_admin_password` you set:
+If a shell is required, connect by SSH to the gateway's public IP as the OS user `netskope` with the `TF_VAR_admin_password` you set:
 
 ```sh
 terraform output nva_ge1_public_ips
@@ -152,20 +152,20 @@ Neighbor        V    AS  MsgRcvd  MsgSent  Up/Down     State/PfxRcd
 169.254.0.39    4   400     111     113    01:40:31     6
 ```
 
-How to read it:
+How to read the output:
 
-- The two `65515` rows are the hub's router IPs. A time in `Up/Down` means the session is established; the number on the right is how many routes the hub is sending us (hub range plus the spokes).
-- The two `169.254.0.x` rows are Netskope's overlay peers. If these are established, the IPsec tunnels to Netskope are up. If they show `Active`/`Connect`, the gateway can't reach Netskope — and the SSE monitor will have withdrawn the default route, which is the correct response.
+- The two `65515` rows are the hub's router IPs. A time in `Up/Down` means the session is established; the number on the right is the number of routes the hub is sending to the gateway (hub range plus the spokes).
+- The two `169.254.0.x` rows are Netskope's overlay peers. If these are established, the IPsec tunnels to Netskope are up. If they show `Active`/`Connect`, the gateway cannot reach Netskope. In that case the SSE monitor will have withdrawn the default route, which is the correct response.
 
-Then check what the gateway is telling the hub:
+Next, check which routes the gateway is advertising to the hub:
 
 ```sh
 docker exec infiot_spoke vtysh -c "show ip bgp neighbors 10.0.0.69 advertised-routes"
 ```
 
-Expected: exactly one route, `0.0.0.0/0`, metric `10`. If you see spoke ranges listed too, or nothing at all, see [Troubleshooting](TROUBLESHOOTING.md#step-4-is-the-gateway-advertising-the-default-route).
+Expected: exactly one route, `0.0.0.0/0`, metric `10`. If spoke ranges are also listed, or no routes are listed, see [Troubleshooting](TROUBLESHOOTING.md#step-4-is-the-gateway-advertising-the-default-route).
 
-And from the Azure side:
+Then check from the Azure side:
 
 ```sh
 az network vhub bgpconnection list --resource-group rg-ntsk-gw --vhub-name <vhub-name> -o table
@@ -173,7 +173,7 @@ az network vhub bgpconnection list --resource-group rg-ntsk-gw --vhub-name <vhub
 
 Expected: `ProvisioningState` = `Succeeded`, `PeerIp` = the gateway's LAN IP (`terraform output nva_ge2_private_ips`), `PeerAsn` = 400.
 
-## Watching the SSE Monitor
+## Checking the SSE Monitor
 
 On the gateway:
 
@@ -183,11 +183,11 @@ pgrep -fa sse_monitor.sh                     # exactly one monitor process
 tail -50 /var/log/sse_monitor.log
 ```
 
-The log shows `Tunnel Count=N` every 10 seconds. `N` is how many IPsec tunnels to Netskope are up. When it drops to 0 you'll see `ACTION: Tunnels Down. Retracting default route...`; when tunnels return, `ACTION: Tunnels Up. Re-advertising default route...`. If the count is 0 for a long time, the problem is between the gateway and Netskope (activation, internet access from the WAN side), not with BGP.
+The log shows `Tunnel Count=N` every 10 seconds. `N` is the number of IPsec tunnels to Netskope that are up. When it drops to 0, the log shows `ACTION: Tunnels Down. Retracting default route...`; when tunnels return, it shows `ACTION: Tunnels Up. Re-advertising default route...`. If the count stays at 0 for a long time, the problem is between the gateway and Netskope (activation, internet access from the WAN side), not with BGP.
 
 ## Monitoring Recommendations
 
 - **Azure Monitor**: CPU, network in/out and the VM Availability metric for the gateway VMs. Alert on availability < 100% and sustained CPU > 80%.
 - **NSG flow logs** on `nsg-nva-public` and `nsg-nva-private` if you need traffic visibility.
 - **Netskope SD-WAN portal**: gateway status, tunnel state and policy hits.
-- **SSE monitor log**: the `Tunnel Count` line is the quickest health signal for the Netskope side.
+- **SSE monitor log**: the `Tunnel Count` line is the fastest health indicator for the Netskope side.

@@ -1,20 +1,20 @@
 # State Management
 
-## What State Is and Why It Matters
+## Purpose of Terraform State
 
-Every time Terraform creates something, it records what it made — resource IDs, IP addresses, settings — in a file called `terraform.tfstate`. On the next run it compares that file with your `.tf` files to decide what to change. Lose the file and Terraform forgets everything it built; it would try to create it all again and fail on name clashes. Corrupt it and `apply` may do the wrong thing.
+Each time Terraform creates a resource, it records the details (resource IDs, IP addresses, settings) in a file called `terraform.tfstate`. On the next run it compares that file with your `.tf` files to decide what to change. If the file is lost, Terraform has no record of the resources it created. It would try to create them all again and fail on name conflicts. If the file is corrupted, `apply` may make incorrect changes.
 
-State also contains secrets: the gateway activation tokens, the OS password, private IPs. Treat it like a credentials file.
+State also contains secrets: the gateway activation tokens, the OS password, private IPs. Protect it in the same way as a credentials file.
 
-Right now both workspaces keep state **locally** — `vwan-lab/terraform.tfstate` and `vwan-lab-nva/terraform.tfstate` — plus a `.backup` of the previous version. That's fine for one person working from one laptop. It is not fine when a second person, or a pipeline, needs to run Terraform: they'd have no state and would try to rebuild everything. Both files are gitignored, so don't try to share them through git either.
+Currently both workspaces keep state **locally**, in `vwan-lab/terraform.tfstate` and `vwan-lab-nva/terraform.tfstate`, plus a `.backup` of the previous version. This is suitable for one person working from one laptop. It is not suitable when a second person, or a pipeline, needs to run Terraform: they would have no state and would try to rebuild everything. Both files are gitignored, so do not share them through git either.
 
 ## Moving State to Azure Storage
 
-The standard fix is to keep state in an Azure Storage blob. Everyone (and every pipeline) then reads and writes the same copy, and Azure locks the blob while someone is applying so two runs can't collide.
+The standard solution is to keep state in an Azure Storage blob. Every user and every pipeline then reads and writes the same copy, and Azure locks the blob during an apply so that two runs cannot conflict.
 
-### 1. Create a place to keep it
+### 1. Create the storage account
 
-Use a separate resource group so state outlives the lab:
+Use a separate resource group so that the state is not deleted with the lab:
 
 ```sh
 az group create --name rg-terraform-state --location westeurope
@@ -49,9 +49,9 @@ az role assignment create \
   --scope "$(az storage account show -n <storageaccountname> -g rg-terraform-state --query id -o tsv)"
 ```
 
-### 2. Tell each workspace to use it
+### 2. Configure each workspace
 
-Add a `backend.tf` to each folder. The two workspaces must use **different `key` values** — otherwise they'd overwrite each other:
+Add a `backend.tf` to each folder. The two workspaces must use **different `key` values**. Otherwise they would overwrite each other:
 
 ```hcl
 # vwan-lab/backend.tf
@@ -85,21 +85,21 @@ In each folder:
 terraform init -migrate-state
 ```
 
-Terraform notices the backend has changed, asks "Do you want to copy existing state to the new backend?", and you answer `yes`. Then confirm nothing was lost:
+Terraform detects that the backend has changed and asks "Do you want to copy existing state to the new backend?". Answer `yes`. Then confirm that nothing was lost:
 
 ```sh
 terraform plan -var-file=terraform.tfvars    # should report "No changes"
 ```
 
-Once that's clean, delete the local `terraform.tfstate` and `terraform.tfstate.backup` so nobody picks up a stale copy by mistake.
+When the plan reports no changes, delete the local `terraform.tfstate` and `terraform.tfstate.backup` so that an outdated copy is not used by mistake.
 
 ### 4. Authentication
 
-The backend logs in the same way the provider does — your `az login`, or `ARM_*` variables for a service principal. The identity needs the Storage Blob Data Contributor role from step 1 in addition to its deployment permissions.
+The backend authenticates in the same way as the provider: with your `az login`, or with `ARM_*` variables for a service principal. The identity needs the Storage Blob Data Contributor role from step 1 in addition to its deployment permissions.
 
-## Optional: Stop Copying Phase 1 Values by Hand
+## Optional: Read Phase 1 Outputs Automatically
 
-With both states in the same storage account, Phase 2 could read the hub ID and router IPs straight from Phase 1's state instead of you copying them into `terraform.tfvars`:
+With both states in the same storage account, Phase 2 could read the hub ID and router IPs directly from the Phase 1 state, instead of a manual copy into `terraform.tfvars`:
 
 ```hcl
 data "terraform_remote_state" "vwan" {
@@ -114,14 +114,14 @@ data "terraform_remote_state" "vwan" {
 # then use data.terraform_remote_state.vwan.outputs.virtual_hub_id etc.
 ```
 
-This is **not** implemented in the current code — `virtual_hub_id` and `virtual_router_ips` are ordinary variables — but it's the natural next step once state is remote.
+This is **not** implemented in the current code: `virtual_hub_id` and `virtual_router_ips` are ordinary variables. It is the logical next step once state is remote.
 
-## Good Habits
+## Recommended Practices
 
-- Keep blob versioning on. If an apply goes wrong you can restore the previous state version from the portal.
-- Never hand-edit state. If you must fix it, use `terraform state` commands (`list`, `show`, `rm`, `mv`).
-- Don't run `apply` in two terminals at once against local state; with the Azure backend, locking prevents this for you.
-- `terraform.tfvars`, `*.tfstate` and `*.tfstate.backup` are gitignored — keep them that way.
+- Keep blob versioning enabled. If an apply causes a problem, you can restore the previous state version from the portal.
+- Never edit state by hand. If it must be corrected, use `terraform state` commands (`list`, `show`, `rm`, `mv`).
+- Do not run `apply` in two terminals at the same time against local state. With the Azure backend, locking prevents this.
+- `terraform.tfvars`, `*.tfstate` and `*.tfstate.backup` are gitignored. Keep them gitignored.
 
 ## Other Backends
 

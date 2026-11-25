@@ -10,7 +10,7 @@ See the [root README](../README.md) and [docs/](../docs/QUICKSTART.md) for archi
 
 ```sh
 cp example.tfvars terraform.tfvars
-# Edit: set virtual_hub_id, virtual_router_ips (from Phase 1 output), gateway_policy
+# Edit: set virtual_hub_id, virtual_router_ips (from Phase 1 output), vhub_address_prefix, gateway_policy
 
 export TF_VAR_netskope_tenant_url='your-tenant.infiot.net'
 export TF_VAR_netskope_tenant_token='YOUR_API_TOKEN'
@@ -28,7 +28,7 @@ terraform apply -var-file=terraform.tfvars
 terraform output bgp_verify_commands
 ```
 
-Expected: both hub router IPs and both Netskope overlay peers `Established`; exactly `0.0.0.0/0` (MED 10) advertised to each hub peer. See [Operations — BGP Verification](../docs/OPERATIONS.md#checking-bgp-health).
+Expected: both hub router IPs and both Netskope overlay peers `Established`; exactly `0.0.0.0/0` (MED 10) advertised to each hub peer. See [Operations — Checking BGP Health](../docs/OPERATIONS.md#checking-bgp-health).
 
 ## Re-Running Configuration
 
